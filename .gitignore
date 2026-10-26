@@ -1,7 +1,2 @@
-__pycache__/
-*.pyc
-.venv/
-config.json
-data/*
-!data/.gitkeep
-sortie/
+node_modules/
+.DS_Store

@@ -1,16 +1,17 @@
-# Modèle de lettre de motivation (corps du mail)
-#
-# - Chaque [section] contient une ou plusieurs variantes séparées par une ligne "--".
-#   Une variante est tirée au hasard (mais toujours la même pour un hôtel donné),
-#   pour que les 50 mails du jour ne soient pas mot pour mot identiques.
-# - Si une variante utilise une info inconnue (ex: {chambres} vide), elle est ignorée
-#   et une autre variante de la section est utilisée.
-# - [segment:xxx] : paragraphe choisi selon le type d'hôtel
-#   independant | intermediaire | groupe | luxe
-#
-# Variables : {hotel} {de_hotel} {au_sein_de} {ville} {a_ville} {chambres}
-#             {etoiles} {marque} {prenom} {nom} {telephone} {email}
-# Les lignes qui commencent par # sont des commentaires.
+/**
+ * La lettre de motivation (corps du mail) : modifiez le texte entre les deux accents graves ` ci-dessous.
+ *
+ * - Chaque [section] contient une ou plusieurs variantes séparées par une ligne "--".
+ *   Une variante est tirée au hasard (mais toujours la même pour un hôtel donné),
+ *   pour que les 50 mails du jour ne soient pas mot pour mot identiques.
+ * - Si une variante utilise une info inconnue (ex : {chambres} vide), elle est ignorée.
+ * - [segment:xxx] : paragraphe choisi selon le type d'hôtel : independant | intermediaire | groupe | luxe
+ * - [langues] est collé à la fin du paragraphe précédent (et omis pour les hôtels "luxe").
+ *
+ * Variables : {hotel} {de_hotel} {au_sein_de} {ville} {a_ville} {chambres} {etoiles} {marque}
+ *             {prenom} {nom} {telephone} {email}
+ */
+const LETTRE = `
 
 [objet]
 Candidature spontanée - Adjoint à la direction - {hotel}
@@ -56,7 +57,6 @@ Je mesure le niveau d'exigence d'un établissement {etoiles} étoiles comme le v
 --
 Je mesure le niveau d'exigence d'un établissement comme le vôtre, où le client remarque tout. Chez Air Liquide comme chez Keolis, j'ai appris à aller dans le détail des processus pour repérer ce qui coince, et je crois que c'est une habitude utile dans un hôtel de ce niveau. J'ai par ailleurs étudié trois ans à Manchester et je parle anglais couramment, ainsi qu'espagnol.
 
-# Phrase ajoutée à la fin du paragraphe précédent. Pas utilisée pour les hôtels "luxe" (déjà dit au-dessus).
 [langues]
 Je parle anglais couramment, après trois ans d'études à Manchester, et j'ai un bon niveau d'espagnol.
 --
@@ -76,3 +76,80 @@ Je vous remercie de votre attention et vous prie d'agréer, Madame, Monsieur, me
 {prenom} {nom}
 {telephone}
 {email}
+`;
+
+const ORDRE_LETTRE = ['ouverture', 'parcours', 'hotellerie', 'segment', 'langues', 'conclusion', 'politesse'];
+const CHAMPS_OPTIONNELS = ['chambres', 'etoiles', 'marque', 'ville'];
+
+function lireModele_(texte) {
+  const sections = {};
+  let courante = null, tampon = [];
+  const vider = () => {
+    if (courante === null) return;
+    sections[courante] = tampon.join('\n').split(/^--\s*$/m).map(v => v.replace(/^\n+|\n+$/g, '')).filter(v => v.trim());
+  };
+  texte.split('\n').forEach(l => {
+    const m = l.match(/^\[([\w:]+)\]\s*$/);
+    if (m) { vider(); courante = m[1]; tampon = []; } else tampon.push(l);
+  });
+  vider();
+  return sections;
+}
+
+/** 'Hôtel du Parc' -> "de l'Hôtel du Parc", 'Le Grand Hôtel' -> 'du Grand Hôtel', 'Mercure Lyon' -> "de l'hôtel Mercure Lyon" */
+function deHotel_(nom) {
+  const n = String(nom).trim(), low = n.toLowerCase();
+  if (/^l['’]/.test(low)) return 'de ' + n;
+  if (/^(h[oô]tel|auberge|appart|aparth[oô]tel)/.test(low)) return "de l'" + n;
+  if (low.indexOf('le ') === 0) return 'du ' + n.slice(3);
+  if (low.indexOf('les ') === 0) return 'des ' + n.slice(4);
+  if (low.indexOf('la ') === 0) return 'de la ' + n.slice(3);
+  return "de l'hôtel " + n;
+}
+
+function champsLettre_(h, c) {
+  const nom = String(h.nom).trim(), ville = String(h.ville || '').trim(), de = deHotel_(nom);
+  return {
+    hotel: nom, de_hotel: de, au_sein_de: 'au sein ' + de, ville: ville,
+    a_ville: ville && nom.toLowerCase().indexOf(ville.toLowerCase()) < 0 ? ' à ' + ville : '',
+    chambres: h.chambres ? String(h.chambres) : '', etoiles: h.etoiles ? String(h.etoiles) : '',
+    marque: h.marque || '', prenom: c.prenom, nom: c.nom, telephone: c.telephone, email: c.email,
+  };
+}
+
+function hash_(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h;
+}
+
+function choisirVariante_(variantes, f, graine) {
+  const ok = (variantes || []).filter(v => (v.match(/\{(\w+)\}/g) || [])
+    .every(x => { const k = x.slice(1, -1); return CHAMPS_OPTIONNELS.indexOf(k) < 0 || f[k]; }));
+  if (!ok.length) return null;
+  return ok[hash_(graine) % ok.length].replace(/\{(\w+)\}/g, (x, k) => (k in f ? f[k] : x));
+}
+
+/** Retourne { objet, corps } pour un hôtel. */
+function construireLettre_(h, candidat) {
+  const s = lireModele_(LETTRE), f = champsLettre_(h, candidat);
+  const seg = h.segment || 'independant', graine = String(h.nom).toLowerCase();
+  const paras = [];
+  ORDRE_LETTRE.forEach(cle => {
+    if (cle === 'segment') cle = 'segment:' + seg;
+    if (cle === 'langues' && seg === 'luxe') return;
+    const t = choisirVariante_(s[cle], f, graine + cle);
+    if (t && cle === 'langues' && paras.length) paras[paras.length - 1] += ' ' + t;
+    else if (t) paras.push(t);
+  });
+  return {
+    objet: choisirVariante_(s.objet, f, graine + 'objet'),
+    corps: 'Madame, Monsieur,\n\n' + paras.join('\n\n') + '\n\n' + choisirVariante_(s.signature, f, graine),
+  };
+}
+
+/** "CV Léopold Watchi Hôtel du Parc.pdf" */
+function nomFichierCv_(nomHotel, c, ext) {
+  const propre = String(nomHotel).replace(/[<>:"/\\|?*\n\r\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return 'CV ' + c.prenom + ' ' + c.nom + ' ' + propre + (ext || '.pdf');
+}
