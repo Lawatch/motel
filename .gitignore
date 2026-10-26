@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+config.json
+data/*
+!data/.gitkeep
+sortie/
