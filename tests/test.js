@@ -10,13 +10,13 @@ function fakeSheet() {
     getLastRow: () => rows.length,
     getDataRange: () => ({ getValues: () => rows.map(r => r.slice()) }),
     getRange(r, c, n, m) {
-      return { setNumberFormat() {}, setValues(v) { v.forEach((row, i) => { rows[r - 1 + i] = row.slice(); }); } };
+      return { setNumberFormat() { return this; }, setValues(v) { v.forEach((row, i) => { rows[r - 1 + i] = row.slice(); }); } };
     },
   };
   return sh;
 }
 function context() {
-  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {};
+  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {}, cache = {}, triggers = [];
   const ss = {
     getId: () => 'ss1', getUrl: () => 'https://sheet',
     getSheets: () => [sheets['Feuille 1']],
@@ -33,10 +33,14 @@ function context() {
   };
   const blob = name => ({ n: name, setName(x) { this.n = x; return this; }, getName() { return this.n; }, copyBlob() { return blob(this.n); }, getBytes: () => [1] });
   const ctx = {
-    console, user: 'leo.watchi@gmail.com', sent,
+    console, user: 'leo.watchi@gmail.com', sent, triggers, cache,
     Utilities: { formatDate: (d, tz, f) => d.toISOString().slice(0, f.indexOf('HH') > 0 ? 19 : 10) },
     SpreadsheetApp: { create: () => ss, openById: () => ss },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
+    CacheService: { getScriptCache: () => ({ getAll: ks => { const o = {}; ks.forEach(k => { if (cache[k]) o[k] = cache[k]; }); return o; },
+      putAll: o => Object.assign(cache, o) }) },
+    ScriptApp: { getProjectTriggers: () => triggers, deleteTrigger: t => triggers.splice(triggers.indexOf(t), 1),
+      newTrigger: f => ({ timeBased: () => ({ everyMinutes: () => ({ create: () => triggers.push({ getHandlerFunction: () => f }) }) }) }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => ctx.user }) },
     MailApp: { getRemainingDailyQuota: () => 100 },
@@ -74,6 +78,12 @@ test('classement des adresses', () => {
     'recrutement@hotel-du-parc.fr': '/recrutement', 'info.resa@hotel-du-parc.fr': '' }, site);
   same(r.slice(0, 3).map(c => c.email.split('@')[0]), ['recrutement', 'direction', 'contact']);
   assert.ok(r[r.length - 1].score < 0);
+  // le texte autour de l'adresse compte : "envoyez votre CV à ..." passe devant direction@
+  const h = { _trouves: {}, _infos: {}, _contexte: {} };
+  g.recolter_('<p>Réservations : <a href="mailto:hello@hotel-du-parc.fr">écrivez-nous</a></p><p>Pour nous rejoindre, envoyez votre CV à equipe@hotel-du-parc.fr</p><p>direction@hotel-du-parc.fr</p>', site, h);
+  const r2 = g.classer_(h._trouves, site, h._contexte);
+  same(r2.map(c => c.email.split('@')[0]), ['equipe', 'direction', 'hello']);
+  assert.ok(r2[0].raisons.includes('indiquée pour le recrutement sur le site'));
   assert.strictEqual(g.devinerAccor_('https://all.accor.com/hotel/1234/index.fr.shtml')[0], 'h1234-gm@accor.com');
 });
 
@@ -110,14 +120,22 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
     { type: 'node', id: 1, tags: { name: 'Hôtel du Parc', website: 'http://hotelduparc.test/', tourism: 'hotel' } },
     { type: 'node', id: 2, tags: { name: 'Hôtel Fantôme', website: 'http://site-mort.test/', tourism: 'hotel' } },
     { type: 'node', id: 3, tags: { name: 'Sans contact', tourism: 'hotel' } },
-    { type: 'way', id: 4, tags: { name: 'Hôtel Bis', email: 'direction@hotelduparc.fr', tourism: 'hotel' } },
+    { type: 'way', id: 4, tags: { name: 'Hôtel Bis', email: 'marie.dupont@hotelduparc.fr', tourism: 'hotel' } },
   ] };
+  g.eval("PropertiesService.getScriptProperties().setProperty('MODE_TEST', 'oui')");
   const r = g.scanVille('Lyon', 100);
-  assert.strictEqual(r.total, 3);
-  g.analyserLot(r.aAnalyser);
+  same([r.total, r.nouveaux], [3, 3]);
+  assert.strictEqual(g.triggers.length, 1);              // analyse en arrière-plan programmée
+  assert.strictEqual(g.analyserProchains(2), 2);
+  assert.strictEqual(g.analyserProchains(2), 1);          // les 2 premiers sont déjà réservés / faits
+  assert.strictEqual(g.analyserProchains(2), 0);
+  g.traiterFileAttente();
+  assert.strictEqual(g.triggers.length, 0);              // plus rien à faire : le déclencheur s'arrête
   const hs = g.listeHotels('Lyon');
   const parc = hs.find(h => h.nom === 'Hôtel du Parc');
-  assert.strictEqual(parc.email_choisi, 'direction@hotelduparc.fr');
+  // "Directeur de la publication : Marie Dupont, marie.dupont@..." passe devant direction@
+  assert.strictEqual(parc.email_choisi, 'marie.dupont@hotelduparc.fr');
+  assert.ok(parc.emails[0].raisons.includes('indiquée comme adresse de la direction'));
   same([parc.chambres, parc.etoiles, parc.segment], [28, 3, 'independant']);
   const found = parc.emails.map(c => c.email);
   assert.ok(found.includes('contact@hotelduparc.fr') && found.includes('marie.dupont@hotelduparc.fr'));
@@ -126,23 +144,23 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
   assert.strictEqual(hs.find(h => h.nom === 'Hôtel Fantôme').emails.length, 0);
 
   // un 2e scan ne crée pas de doublon
-  g.scanVille('Lyon', 100);
+  assert.strictEqual(g.scanVille('Lyon, Annecy', 100).nouveaux, 0);
   assert.strictEqual(g.listeHotels().length, 3);
 
   g.envoyer(parc.id);
   assert.strictEqual(g.sent[0].to, 'leo.watchi@gmail.com');
-  assert.ok(g.sent[0].objet.startsWith('[TEST -> direction@hotelduparc.fr]'));
+  assert.ok(g.sent[0].objet.startsWith('[TEST -> marie.dupont@hotelduparc.fr]'));
   assert.strictEqual(g.sent[0].pj, 'CV Léopold Watchi Hôtel du Parc.pdf');
   assert.strictEqual(g.etat().envoyesAujourdhui, 0);
 
-  g.eval('CONFIG.modeTest = false');
+  assert.strictEqual(g.choisirModeTest(false), false);
   g.envoyer(parc.id);
-  assert.strictEqual(g.sent[1].to, 'direction@hotelduparc.fr');
+  assert.strictEqual(g.sent[1].to, 'marie.dupont@hotelduparc.fr');
   assert.strictEqual(g.sent[1].from, 'Léopold Watchi');
   assert.strictEqual(g.etat().envoyesAujourdhui, 1);
   assert.throws(() => g.envoyer(parc.id), /déjà envoyé/);
   const bis = g.listeHotels().find(h => h.nom === 'Hôtel Bis');
-  assert.strictEqual(bis.email_choisi, 'direction@hotelduparc.fr');
+  assert.strictEqual(bis.email_choisi, 'marie.dupont@hotelduparc.fr');
   assert.ok(bis.deja_envoye);
   assert.throws(() => g.envoyer(bis.id), /déjà reçu une candidature/);
   assert.strictEqual(g.sent.length, 2);

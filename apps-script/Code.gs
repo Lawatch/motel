@@ -13,11 +13,11 @@ const CONFIG = {
 
   cvNom: 'CV_Leopold_Watchi',          // nom du CV dans Google Drive (PDF ou Google Doc, sans l'extension)
 
-  modeTest: true,                      // true : tout part vers adresseTest, rien n'est marqué comme envoyé
+  // Le mode test (tout part vers adresseTest) se change directement dans la page, bouton en haut.
   adresseTest: 'leo.watchi@gmail.com',
 
-  limiteParJour: 60,
-  delaiEntreEnvoisSec: [6, 15],        // pause aléatoire entre deux mails
+  limiteParJour: 100,                  // Gmail autorise 100 destinataires par jour depuis un script
+  delaiEntreEnvoisSec: [3, 6],         // pause aléatoire entre deux mails (100 mails ≈ 10 min)
   scoreMinimumAuto: 20,                // score minimum pour la sélection automatique
   copieCvDrive: false,                 // true : garde une copie de chaque CV renommé dans Drive
 };
@@ -33,7 +33,8 @@ function doGet() {
 function etat() {
   const compte = Session.getEffectiveUser().getEmail();
   return {
-    modeTest: CONFIG.modeTest,
+    modeTest: modeTest_(),
+    aAnalyser: lireHotels_().filter(h => h.statut === 'a_analyser').length,
     compte: compte,
     bonCompte: compte.toLowerCase() === CONFIG.email.toLowerCase(),
     envoyesAujourdhui: envoisDuJour_(),
@@ -43,6 +44,14 @@ function etat() {
     delai: CONFIG.delaiEntreEnvoisSec,
     sheetUrl: classeur_().getUrl(),
   };
+}
+
+function modeTest_() { return PropertiesService.getScriptProperties().getProperty('MODE_TEST') === 'oui'; }
+
+/** Bouton "mode test / envoi réel" de la page. */
+function choisirModeTest(test) {
+  PropertiesService.getScriptProperties().setProperty('MODE_TEST', test ? 'oui' : 'non');
+  return modeTest_();
 }
 
 // ============================================================ STOCKAGE (Google Sheet)
@@ -115,66 +124,104 @@ function envoisDuJour_() { const j = aujourdhui_(); return lireEnvois_().filter(
 
 // ============================================================ API appelée par la page
 
-/** 1. Liste des hôtels d'une ville (OpenStreetMap). Retourne les id à analyser. */
-function scanVille(ville, limite) {
-  ville = String(ville || '').trim();
-  if (!ville) throw new Error('Indiquez une ville');
-  const trouves = hotelsOsm_(ville).slice(0, limite || 150);
+/** 1. Liste des hôtels d'une ou plusieurs villes ("Lyon, Annecy, Grenoble"). Les sites sont ensuite
+ *  analysés par la page (plusieurs lots en parallèle) et, si la page est fermée, en arrière-plan. */
+function scanVille(villes, limite) {
+  const liste = String(villes || '').split(/[,;\n]+/).map(v => v.trim()).filter(Boolean);
+  if (!liste.length) throw new Error('Indiquez une ville');
+  const parVille = liste.map(v => ({ ville: v, hotels: hotelsOsm_(v).slice(0, limite || 150) }));
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
+  let total = 0, nouveauxTotal = 0;
   try {
     const existants = lireHotels_();
     const parCle = {};
     existants.forEach(h => { parCle[h.cle] = h; });
     let maxId = existants.reduce((m, h) => Math.max(m, Number(h.id) || 0), 0);
-    const nouveaux = [], aAnalyser = [], maj = [];
-    trouves.forEach(t => {
+    const nouveaux = [], maj = [];
+    parVille.forEach(pv => pv.hotels.forEach(t => {
+      total++;
       const h = parCle[t.cle];
       if (h) {
-        h.recherche = ville; maj.push(h);
-        if (h.statut === 'a_analyser') aAnalyser.push(h.id);
-      } else {
-        t.id = ++maxId; t.statut = 'a_analyser'; t.recherche = ville;
-        t.emails = t.emails_osm.map(e => ({ email: e, source: 'OpenStreetMap' }));  // adresse indiquée sur la carte
-        nouveaux.push(t); aAnalyser.push(t.id);
-        parCle[t.cle] = t;
+        if (h.recherche !== pv.ville) { h.recherche = pv.ville; maj.push(h); }
+        return;
       }
-    });
+      t.id = ++maxId; t.statut = 'a_analyser'; t.recherche = pv.ville;
+      t.emails = t.emails_osm.map(e => ({ email: e, source: 'OpenStreetMap' }));  // adresse indiquée sur la carte
+      nouveaux.push(t);
+      parCle[t.cle] = t;
+    }));
     if (nouveaux.length) {
       const sh = feuille_('Hôtels');
-      sh.getRange(sh.getLastRow() + 1, 1, nouveaux.length, COLS.length).setValues(nouveaux.map(ligne_));
+      sh.getRange(sh.getLastRow() + 1, 1, nouveaux.length, COLS.length).setNumberFormat('@').setValues(nouveaux.map(ligne_));
     }
     ecrireHotels_(maj);
-    return { recherche: ville, total: trouves.length, aAnalyser: aAnalyser };
+    nouveauxTotal = nouveaux.length;
   } finally {
     lock.releaseLock();
   }
+  if (nouveauxTotal) assurerDeclencheur_();
+  return { recherches: liste, total: total, nouveaux: nouveauxTotal };
 }
 
-/** 2. Analyse des sites d'un petit lot d'hôtels (appelée en boucle par la page). */
-function analyserLot(ids) {
-  const set = {};
-  ids.forEach(i => { set[i] = true; });
-  const lot = lireHotels_().filter(h => set[h.id]);
-  crawlLot_(lot);
+/** 2. Analyse les prochains hôtels en attente. Plusieurs appels peuvent tourner en même temps :
+ *  chaque hôtel est "réservé" quelques minutes pour ne pas être analysé deux fois. Retourne le nombre traité. */
+function analyserProchains(n) {
+  const cache = CacheService.getScriptCache();
   const lock = LockService.getScriptLock();
+  let lot;
+  lock.waitLock(30000);
+  try {
+    const attente = lireHotels_().filter(h => h.statut === 'a_analyser');
+    const pris = cache.getAll(attente.map(h => 'analyse_' + h.id));
+    lot = attente.filter(h => !pris['analyse_' + h.id]).slice(0, n || 8);
+    const marques = {};
+    lot.forEach(h => { marques['analyse_' + h.id] = '1'; });
+    if (lot.length) cache.putAll(marques, 240);
+  } finally {
+    lock.releaseLock();
+  }
+  if (!lot.length) return 0;
+  crawlLot_(lot);
   lock.waitLock(30000);
   try {
     const frais = {};
     lireHotels_().forEach(h => { frais[h.id] = h; });
-    lot.forEach(h => {
+    const aEcrire = lot.filter(h => frais[h.id]).map(h => {
       const f = frais[h.id];
       Object.assign(f, {
         emails: h.emails, chambres: h.chambres, etoiles: h.etoiles, marque: h.marque, segment: h.segment,
         statut: f.statut === 'a_analyser' ? 'nouveau' : f.statut, scanne_le: maintenant_(),
       });
       if (!f.email_choisi && h.emails.length) f.email_choisi = h.emails[0].email;
+      return f;
     });
-    ecrireHotels_(lot.map(h => frais[h.id]));
+    ecrireHotels_(aEcrire);
   } finally {
     lock.releaseLock();
   }
   return lot.length;
+}
+
+/** Analyse en arrière-plan (déclencheur toutes les minutes), même page fermée. S'arrête quand tout est fait. */
+function traiterFileAttente() {
+  const debut = Date.now();
+  while (Date.now() - debut < 4 * 60 * 1000) {
+    if (!analyserProchains(10)) {
+      if (!lireHotels_().some(h => h.statut === 'a_analyser')) supprimerDeclencheur_();
+      return;
+    }
+  }
+}
+
+function assurerDeclencheur_() {
+  if (ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'traiterFileAttente')) return;
+  ScriptApp.newTrigger('traiterFileAttente').timeBased().everyMinutes(1).create();
+}
+
+function supprimerDeclencheur_() {
+  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'traiterFileAttente')
+    .forEach(t => ScriptApp.deleteTrigger(t));
 }
 
 function recherches() {
@@ -242,7 +289,8 @@ function envoyer(id) {
       h.statut = 'ignore'; ecrireHotels_([h]);
       throw new Error(to + ' a déjà reçu une candidature : envoi annulé');
     }
-    if (!CONFIG.modeTest && envoisDuJour_() >= CONFIG.limiteParJour) throw new Error('Limite quotidienne atteinte');
+    const test = modeTest_();
+    if (!test && envoisDuJour_() >= CONFIG.limiteParJour) throw new Error('Limite quotidienne atteinte');
     if (MailApp.getRemainingDailyQuota() < 1) throw new Error('Quota Gmail du jour épuisé');
 
     const l = construireLettre_(h, CONFIG);
@@ -251,12 +299,14 @@ function envoyer(id) {
     const cv = cvBlob_().setName(nomFichierCv_(h.nom, CONFIG, '.pdf'));
     const options = { attachments: [cv], name: CONFIG.prenom + ' ' + CONFIG.nom, replyTo: CONFIG.email };
 
-    if (CONFIG.modeTest) {
+    if (test) {
       GmailApp.sendEmail(CONFIG.adresseTest, '[TEST -> ' + to + '] ' + objet, corps, options);
       return { test: true, hotel: h.nom };
     }
     GmailApp.sendEmail(to, objet, corps, options);
-    feuille_('Envois').appendRow([to, h.id, h.nom, objet, maintenant_()]);
+    const env = feuille_('Envois');
+    env.getRange(env.getLastRow() + 1, 1, 1, COLS_ENVOIS.length).setNumberFormat('@')
+      .setValues([[to, h.id, h.nom, objet, maintenant_()]]);
     h.statut = 'envoye';
     ecrireHotels_([h]);
     if (CONFIG.copieCvDrive) dossierCopies_().createFile(cv);
@@ -296,14 +346,22 @@ function dossierCopies_() {
   return it.hasNext() ? it.next() : DriveApp.createFolder('Candidatures hôtels - CV envoyés');
 }
 
-/** À lancer une fois depuis l'éditeur (bouton Exécuter) pour donner les autorisations et vérifier le CV. */
+/** À lancer depuis l'éditeur (bouton Exécuter) après chaque copier-coller du code :
+ *  donne les autorisations, vérifie le CV et s'envoie un mail de contrôle avec le CV joint. */
 function installer() {
   const ss = classeur_();
-  const cv = cvBlob_();
+  const cv = cvBlob_().setName(nomFichierCv_('Hôtel Exemple', CONFIG, '.pdf'));
+  ScriptApp.getProjectTriggers();   // autorisation pour l'analyse en arrière-plan
+  const compte = Session.getEffectiveUser().getEmail();
   Logger.log('Suivi : ' + ss.getUrl());
-  Logger.log('CV trouvé : ' + cv.getName() + ' (' + Math.round(cv.getBytes().length / 1024) + ' Ko)');
-  Logger.log('Compte : ' + Session.getEffectiveUser().getEmail());
+  Logger.log('CV trouvé (' + Math.round(cv.getBytes().length / 1024) + ' Ko)');
+  Logger.log('Compte : ' + compte + (compte.toLowerCase() === CONFIG.email.toLowerCase() ? ' ✔' : ' ✘ ce n\'est pas ' + CONFIG.email));
+  const l = construireLettre_({ nom: 'Hôtel Exemple', ville: 'Lyon', segment: 'independant' }, CONFIG);
+  GmailApp.sendEmail(compte, '[Contrôle] ' + l.objet, l.corps,
+    { attachments: [cv], name: CONFIG.prenom + ' ' + CONFIG.nom, replyTo: CONFIG.email });
+  Logger.log('Mail de contrôle envoyé à ' + compte + ' : vérifiez votre boîte de réception.');
   Logger.log('Quota Gmail restant aujourd\'hui : ' + MailApp.getRemainingDailyQuota());
+  Logger.log('Mode : ' + (modeTest_() ? 'TEST' : 'ENVOI RÉEL'));
 }
 
 // ============================================================ OPENSTREETMAP
@@ -356,10 +414,12 @@ function entier_(v) { const m = String(v || '').match(/\d+/); return m ? Number(
 
 // ============================================================ ANALYSE DES SITES
 
-const INDICES_LIENS = /contact|mention|legal|recrut|emploi|carriere|career|job|rejoindre|equipe|team|about|a-propos|qui-sommes|notre-hotel|l-hotel|nous-trouver|acces|impressum/i;
-const PAGES_PRIORITAIRES = /recrut|emploi|carri|job|mention|legal/i;
-const CHEMINS_COURANTS = ['/contact', '/mentions-legales'];
-const MAX_SOUS_PAGES = 6;
+// Pages visitées en plus de l'accueil, par ordre d'intérêt : recrutement > mentions légales > contact
+const LIENS_RECRUTEMENT = /recrut|emploi|carri[eè]re|career|jobs?\b|rejoin|nous-rejoindre|join-us|work-with-us|travailler|candidature/i;
+const LIENS_MENTIONS = /mention|legal|impressum/i;
+const LIENS_CONTACT = /contact|nous-ecrire|acces|nous-trouver/i;
+const PAGES_PRIORITAIRES = /recrut|emploi|carri|job|rejoin|candidature|mention|legal/i;
+const MAX_SOUS_PAGES = 3;
 
 /** Récupère plusieurs URLs en parallèle. Une URL en erreur donne null (sans bloquer les autres). */
 function recupererPages_(urls) {
@@ -384,6 +444,7 @@ function crawlLot_(hotels) {
     h._trouves = {};
     (h.emails || []).forEach(c => { if (c.source !== 'déduite') h._trouves[c.email] = c.source; });
     h._infos = { chambres: null, etoiles: null };
+    h._contexte = {};
     h.site = normaliserUrl_(h.site);
   });
   const avecSite = hotels.filter(h => h.site);
@@ -417,11 +478,13 @@ function liensUtiles_(html, base) {
     if (/^(mailto|tel|javascript):/i.test(href)) continue;
     const url = resoudreUrl_(base, href).split('#')[0];
     if (!url || domaineSite_(url) !== dom || vus[url]) continue;
-    if (INDICES_LIENS.test(m[2].replace(/<[^>]+>/g, ' ') + ' ' + href)) { vus[url] = true; liens.push(url); }
+    const libelle = m[2].replace(/<[^>]+>/g, ' ') + ' ' + href;
+    const rang = LIENS_RECRUTEMENT.test(libelle) ? 0 : LIENS_MENTIONS.test(libelle) ? 1 : LIENS_CONTACT.test(libelle) ? 2 : -1;
+    if (rang >= 0) { vus[url] = true; liens.push({ url: url, rang: rang }); }
   }
-  CHEMINS_COURANTS.forEach(p => { const u = resoudreUrl_(base, p); if (!vus[u]) { vus[u] = true; liens.push(u); } });
-  liens.sort((a, b) => (PAGES_PRIORITAIRES.test(a) ? 0 : 1) - (PAGES_PRIORITAIRES.test(b) ? 0 : 1));
-  return liens.slice(0, MAX_SOUS_PAGES);
+  if (!liens.some(l => l.rang === 2)) liens.push({ url: resoudreUrl_(base, '/contact'), rang: 3 });
+  liens.sort((a, b) => a.rang - b.rang);
+  return liens.slice(0, MAX_SOUS_PAGES).map(l => l.url);
 }
 
 function resoudreUrl_(base, href) {
@@ -438,8 +501,9 @@ function recolter_(html, url, h) {
   extraireEmails_(html).forEach(e => {
     if (!(e in h._trouves) || PAGES_PRIORITAIRES.test(url)) h._trouves[e] = url;
   });
-  const texte = html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&eacute;/g, 'é').replace(/\s+/g, ' ');
+  const texte = texteBrut_(html);
+  const ctx = contexteEmails_(texte);
+  for (const e in ctx) if (!h._contexte[e] || ctx[e] === 'recrutement') h._contexte[e] = ctx[e];
   if (!h._infos.chambres) {
     const m = texte.match(/\b(\d{1,3})\s+(?:chambres|rooms|chambres et suites)\b/i);
     if (m && Number(m[1]) >= 2) h._infos.chambres = Number(m[1]);
@@ -450,11 +514,36 @@ function recolter_(html, url, h) {
   }
 }
 
+function texteBrut_(html) {
+  return html.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<a\s[^>]*href\s*=\s*["']mailto:([^"'?]+)[^>]*>([\s\S]*?)<\/a>/gi, ' $2 $1 ')  // garde l'adresse des liens mailto
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&eacute;/g, 'é').replace(/&egrave;/g, 'è').replace(/&#64;|&commat;/g, '@')
+    .replace(/\s+/g, ' ');
+}
+
+/** Ce que dit le texte juste avant une adresse : "Recrutement : jobs@...", "Envoyez votre CV à ...", "Réservations : ..." */
+function contexteEmails_(texte) {
+  const out = {};
+  let m, finPrecedente = 0;
+  const re = new RegExp(EMAIL_RE.source, 'g');
+  while ((m = re.exec(texte))) {
+    // texte qui précède l'adresse, sans remonter au-delà de l'adresse précédente
+    const avant = texte.slice(Math.max(finPrecedente, m.index - 90), m.index).toLowerCase();
+    finPrecedente = m.index + m[0].length;
+    const e = m[0].toLowerCase();
+    if (/recrut|candidat|emploi|\bcv\b|rejoindre|carri[eè]re|job|ressources humaines|\brh\b|postuler/.test(avant)) out[e] = 'recrutement';
+    else if (/directeur|directrice|direction|g[ée]rant|general manager|propri[ée]taire/.test(avant)) out[e] = out[e] || 'direction';
+    else if (/r[ée]serv|booking|s[ée]minaire|[ée]v[ée]nement|restaurant|spa\b/.test(avant)) out[e] = out[e] || 'client';
+  }
+  return out;
+}
+
 function finaliserHotel_(h) {
   h.chambres = h.chambres || h._infos.chambres;
   h.etoiles = h.etoiles || h._infos.etoiles;
   h.marque = detecterChaine_(h);
-  const classees = classer_(h._trouves, h.site);
+  const classees = classer_(h._trouves, h.site, h._contexte);
   const connues = {};
   classees.forEach(c => { connues[c.email] = true; });
   devinerAccor_(h.site).forEach(g => {
@@ -465,13 +554,14 @@ function finaliserHotel_(h) {
   classees.sort((a, b) => b.score - a.score);
   h.emails = classees;
   h.segment = segment_(h);
-  delete h._trouves; delete h._infos;
+  delete h._trouves; delete h._infos; delete h._contexte;
   return h;
 }
 
 // ============================================================ CHOIX DE L'ADRESSE E-MAIL
-//  1. direction / directeur / GM       -> la personne qu'on veut assister
-//  2. RH / recrutement / emploi        -> le bon canal pour une candidature
+//  1. RH / recrutement / emploi        -> le canal prévu pour les candidatures
+//     (+ bonus si le site la présente comme telle : "Recrutement : ...", "Envoyez votre CV à ...")
+//  2. direction / directeur / GM       -> la personne qu'on veut assister
 //  3. prenom.nom@domaine-de-l-hotel    -> souvent le directeur ou le gérant
 //  4. contact / info / accueil         -> générique mais lu par l'équipe
 //  5. réservation / booking / commercial -> adresses clients, à éviter
@@ -490,7 +580,7 @@ const MESSAGERIES_PERSO = ['gmail.com', 'orange.fr', 'wanadoo.fr', 'free.fr', 's
 
 const REGLES = [
   [/(^|[._-])(direction|directeur|directrice|director|dg|gm|general-?manager|gerant|gerance|manager|management)([._-]|\d|$)/, 50, 'direction'],
-  [/(^|[._-])(rh|drh|hr|recrutement|recrutements|recruitment|recrut|jobs?|emplois?|careers?|carrieres?|candidatures?|talents?|people)([._-]|\d|$)/, 45, 'RH / recrutement'],
+  [/(^|[._-])(rh|drh|hr|recrutement|recrutements|recruitment|recrut|jobs?|emplois?|careers?|carrieres?|candidatures?|talents?|people)([._-]|\d|$)/, 55, 'RH / recrutement'],
   [/(^|[._-])(resa|reservations?|booking|bookings|sales|commercial|ventes?|events?|evenements?|seminaires?|groupes?|groups|mice|banquets?|restaurant|bar|spa|presse|press|marketing|compta|comptabilite|factur|billing|achats?)([._-]|\d|$)/, -40, 'adresse client / service'],
   [/(^|[._-])(contact|info|infos|information|hello|bonjour|accueil|reception|hotel|welcome)([._-]|\d|$)/, 20, 'contact général'],
 ];
@@ -531,7 +621,7 @@ function domaineSite_(url) {
 
 function racine_(dom) { return dom.split('.').slice(-2).join('.'); }
 
-function scoreEmail_(email, site, source) {
+function scoreEmail_(email, site, source, contexte) {
   const parts = email.toLowerCase().split('@'), local = parts[0], dom = parts[1];
   let score = 0, raisons = [];
   const regle = REGLES.find(r => r[0].test(local));
@@ -553,15 +643,19 @@ function scoreEmail_(email, site, source) {
   else if (MESSAGERIES_PERSO.indexOf(dom) >= 0) { score += 3; raisons.push('messagerie perso (petit établissement ?)'); }
   else if (web) { score -= 10; raisons.push('domaine différent du site'); }
 
+  if (contexte === 'recrutement') { score += 45; raisons.push('indiquée pour le recrutement sur le site'); }
+  else if (contexte === 'direction') { score += 15; raisons.push('indiquée comme adresse de la direction'); }
+  else if (contexte === 'client') { score -= 15; raisons.push('indiquée pour les réservations'); }
+
   const src = String(source || '').toLowerCase();
   if (/recrut|emploi|carriere|career|job|rejoindre|join/.test(src)) { score += 10; raisons.push('trouvée sur la page recrutement'); }
   else if (/mention|legal|impressum/.test(src)) { score += 5; raisons.push('trouvée dans les mentions légales'); }
   return { score: score, raisons: raisons };
 }
 
-function classer_(trouves, site) {
+function classer_(trouves, site, contexte) {
   return Object.keys(trouves).map(e => {
-    const s = scoreEmail_(e, site, trouves[e]);
+    const s = scoreEmail_(e, site, trouves[e], (contexte || {})[e]);
     return { email: e, score: s.score, raisons: s.raisons, source: trouves[e] };
   }).sort((a, b) => b.score - a.score || a.email.length - b.email.length);
 }

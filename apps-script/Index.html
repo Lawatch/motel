@@ -50,6 +50,7 @@
 <header>
   <h1>Candidatures hôtels</h1>
   <span id="mode" class="badge"></span>
+  <button id="btnMode" class="small"></button>
   <span class="stat" id="quota"></span>
   <span class="stat" id="compte"></span>
   <span class="stat" id="envoi"></span>
@@ -57,7 +58,7 @@
 
 <main>
   <div class="bar">
-    <input type="text" id="ville" placeholder="Ville ou arrondissement (ex : Lyon, Paris 8e Arrondissement)" size="40">
+    <input type="text" id="ville" placeholder="Une ou plusieurs villes : Lyon, Annecy, Paris 8e Arrondissement" size="48">
     <input type="number" id="limite" value="120" min="10" max="400" title="Nombre max d'hôtels" style="width:80px">
     <button class="primary" id="btnScan">Scanner</button>
     <progress id="prog" value="0" max="1" hidden></progress><span id="progTxt" class="small"></span>
@@ -109,8 +110,9 @@
 <script>
 const $ = s => document.querySelector(s);
 const SEG = {independant:"Indépendant", intermediaire:"Intermédiaire", groupe:"Groupe / chaîne", luxe:"Luxe 5★"};
-const LOT = 8;  // hôtels analysés par appel (un appel Apps Script est limité à 6 minutes)
-let hotels = [], selected = new Set(), state = {}, current = null, stop = false, busy = false;
+const LOT = 6, EN_PARALLELE = 6;  // 6 appels Apps Script en même temps, 6 hôtels chacun
+let hotels = [], selected = new Set(), considered = new Set(), state = {}, current = null;
+let stop = false, sending = false, scanning = false;
 
 function run(fn, ...args) {
   return new Promise((ok, ko) => google.script.run.withSuccessHandler(ok)
@@ -135,6 +137,7 @@ async function refreshState() {
   state = await run("etat");
   $("#mode").textContent = state.modeTest ? "MODE TEST (envoi vers vous)" : "ENVOI RÉEL";
   $("#mode").className = "badge " + (state.modeTest ? "test" : "live");
+  $("#btnMode").textContent = state.modeTest ? "Passer en envoi réel" : "Repasser en mode test";
   $("#quota").textContent = `Envoyés aujourd'hui : ${state.envoyesAujourdhui} / ${state.limite}`;
   $("#compte").innerHTML = `Depuis ${esc(state.compte)} · <a href="${esc(state.sheetUrl)}" target="_blank">suivi (Sheet)</a>`;
   $("#alerte").hidden = state.bonCompte;
@@ -159,11 +162,13 @@ function sendable(h) { return h && h.statut === "nouveau" && h.email_choisi && !
 function chosenScore(h) { const c = h.emails.find(c => c.email === h.email_choisi); return c ? c.score : 0; }
 function visible() { return $("#masquer").checked ? hotels.filter(sendable) : hotels; }
 
-function autoSelect() {
-  selected.clear();
-  const seen = new Set();
+function autoSelect(reset = true) {
+  if (reset) { selected.clear(); considered.clear(); }
+  const seen = new Set(hotels.filter(h => selected.has(h.id)).map(h => h.email_choisi));
   for (const h of visible()) {
-    if (!sendable(h) || chosenScore(h) < state.scoreMin || seen.has(h.email_choisi)) continue;
+    if (!sendable(h) || considered.has(h.id)) continue;
+    considered.add(h.id);   // un hôtel décoché à la main n'est pas recoché au rafraîchissement suivant
+    if (chosenScore(h) < state.scoreMin || seen.has(h.email_choisi)) continue;
     seen.add(h.email_choisi); selected.add(h.id);   // même adresse pour 2 hôtels (chaîne) : une seule fois
   }
   render();
@@ -192,7 +197,7 @@ function render() {
   }).join("");
   $("#nbAffiches").textContent = `${visible().length} hôtels affichés sur ${hotels.length}`;
   $("#selInfo").textContent = `${selected.size} sélectionné(s)`;
-  $("#btnSend").disabled = !selected.size || busy;
+  $("#btnSend").disabled = !selected.size || sending;
 }
 
 $("#rows").addEventListener("change", async e => {
@@ -254,29 +259,55 @@ function progress(fait, total, texte) {
 }
 
 $("#btnScan").onclick = async () => {
-  const ville = $("#ville").value.trim(); if (!ville || busy) return;
-  busy = true; $("#btnScan").disabled = true; $("#log").textContent = "";
+  const villes = $("#ville").value.trim(); if (!villes) return;
+  $("#btnScan").disabled = true; $("#log").textContent = "";
   try {
     progress(0, 1, "Recherche des hôtels sur OpenStreetMap…");
-    const r = await run("scanVille", ville, +$("#limite").value);
-    const ids = r.aAnalyser;
-    for (let i = 0; i < ids.length; i += LOT) {
-      progress(i, ids.length, `${i} / ${ids.length} sites analysés`);
-      try { await run("analyserLot", ids.slice(i, i + LOT)); }
-      catch (err) { $("#log").textContent = "Lot ignoré : " + err.message; }
-    }
-    progress(1, 1, `${r.total} hôtels trouvés, ${ids.length} sites analysés`);
-    await loadRecherches(ville); await loadHotels(); autoSelect();
+    const r = await run("scanVille", villes, +$("#limite").value);
+    $("#progTxt").textContent = `${r.total} hôtels trouvés (${r.nouveaux} nouveaux)`;
+    await loadRecherches(r.recherches.length === 1 ? r.recherches[0] : "");
+    await loadHotels();
+    analyser();
   } catch (err) {
     $("#progTxt").textContent = "Erreur : " + err.message;
   } finally {
-    busy = false; $("#btnScan").disabled = false; render();
+    $("#btnScan").disabled = false;
   }
+};
+
+// Analyse des sites : plusieurs appels en parallèle ; les hôtels apparaissent au fur et à mesure
+// et on peut commencer à envoyer sans attendre la fin. Page fermée, l'analyse continue en arrière-plan.
+async function analyser() {
+  if (scanning) return;
+  scanning = true;
+  let fait = 0, dernierRefresh = 0;
+  const total = (await run("etat")).aAnalyser;
+  const worker = async () => {
+    while (true) {
+      let n = 0;
+      try { n = await run("analyserProchains", LOT); } catch (err) { $("#log").textContent = "Analyse : " + err.message; await sleep(3000); continue; }
+      if (!n) return;
+      fait += n;
+      progress(fait, total, `${fait} / ${total} sites analysés - vous pouvez déjà envoyer`);
+      if (Date.now() - dernierRefresh > 4000) { dernierRefresh = Date.now(); await loadHotels(); autoSelect(false); }
+    }
+  };
+  await Promise.all(Array.from({length: EN_PARALLELE}, worker));
+  scanning = false;
+  progress(1, 1, `Analyse terminée (${fait} sites)`);
+  await loadRecherches($("#recherche").value); await loadHotels(); autoSelect(false);
+}
+
+$("#btnMode").onclick = async () => {
+  const versTest = !state.modeTest;
+  if (!versTest && !(await dialog("Passer en ENVOI RÉEL ? Les candidatures partiront vraiment aux hôtels."))) return;
+  await run("choisirModeTest", versTest);
+  await refreshState();
 };
 
 $("#recherche").onchange = loadHotels;
 $("#masquer").onchange = render;
-$("#btnAuto").onclick = autoSelect;
+$("#btnAuto").onclick = () => autoSelect(true);
 $("#btnNone").onclick = () => { selected.clear(); render(); };
 $("#btnStop").onclick = () => { stop = true; $("#btnStop").disabled = true; };
 
@@ -291,7 +322,7 @@ $("#btnSend").onclick = async () => {
     ? `MODE TEST : ${ids.length} mail(s) vont vous être envoyés à vous-même. Continuer ?`
     : `Envoyer ${ids.length} candidature(s) pour de vrai ? Gardez cet onglet ouvert pendant l'envoi.`);
   if (!ok) return;
-  busy = true; stop = false; $("#btnStop").hidden = false; $("#btnStop").disabled = false; render();
+  sending = true; stop = false; $("#btnStop").hidden = false; $("#btnStop").disabled = false; render();
   let n = 0; const erreurs = [];
   for (const id of ids) {
     if (stop) break;
@@ -308,7 +339,7 @@ $("#btnSend").onclick = async () => {
       await sleep((a + Math.random() * (b - a)) * 1000);
     }
   }
-  busy = false; $("#btnStop").hidden = true;
+  sending = false; $("#btnStop").hidden = true;
   $("#envoi").textContent = `${n} mail(s) envoyé(s)` + (erreurs.length ? `, ${erreurs.length} erreur(s)` : "");
   await refreshState(); await loadHotels();
 };
@@ -322,7 +353,10 @@ $("#btnHist").onclick = async () => {
 $("#hClose").onclick = () => $("#hist").classList.remove("open");
 
 (async () => {
-  try { await refreshState(); await loadRecherches(); await loadHotels(); }
+  try {
+    await refreshState(); await loadRecherches(); await loadHotels(); autoSelect(true);
+    if (state.aAnalyser) analyser();   // reprend une analyse en cours
+  }
   catch (err) { $("#alerte").hidden = false; $("#alerte").textContent = "Erreur : " + err.message; }
 })();
 </script>
