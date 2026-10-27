@@ -39,17 +39,28 @@ Seul `installer` s'envoie un mail de contrôle à vous-même.
 
 **Mise à jour du code** : recoller les fichiers, enregistrer, relancer `installer`, puis si vous utilisez l'URL
 `/exec` : *Déployer → Gérer les déploiements → ✏️ → Version : Nouvelle version → Déployer*.
-Le numéro de version est affiché en haut de la page (`v5 - lettre ciblée, anti-doublon Gmail`) : s'il ne correspond pas,
+Le numéro de version est affiché en haut de la page (`v7 - hôtels classés lus par morceaux (mémoire)`) : s'il ne correspond pas,
 la page tourne encore sur l'ancien code.
+
+**Diagnostic** : la fonction `testerSources` (à lancer depuis l'éditeur, comme `installer`) affiche dans le journal
+le nombre d'hôtels trouvés par source pour Lyon et le temps d'analyse de 8 sites, sans rien enregistrer ni envoyer.
 
 ## Utilisation (≈ 10 minutes pour 50 mails)
 
-1. Taper une ou plusieurs villes (« Lyon, Annecy, Paris 8e Arrondissement ») → **Scanner**.
-   Les hôtels viennent d'OpenStreetMap, puis le script visite leur site (accueil + 3 pages au plus :
-   recrutement en priorité, puis mentions légales, puis contact). 6 analyses tournent en parallèle et les hôtels
-   apparaissent au fur et à mesure : **on peut commencer à envoyer sans attendre la fin**.
-   Si la page est fermée, l'analyse continue en arrière-plan ; le plus efficace est de scanner quelques villes
-   à l'avance pour avoir une réserve d'hôtels prête.
+1. Taper une ou plusieurs zones → **Scanner** : des villes (« Lyon, Annecy »), des arrondissements
+   (« Paris 8e », « Lyon 3 »), des codes postaux (« 69003 ») ou des départements entiers (« 74 », « 2A »).
+   Deux sources sont fusionnées, sans doublon :
+   - la **liste officielle des hôtels classés** (Atout France, sur data.gouv.fr) : tous les hôtels classés de France,
+     avec étoiles, nombre de chambres, site et souvent l'e-mail. Le fichier national n'est jamais chargé en entier :
+     il est lu par morceaux de 1 Mo et seules les lignes des zones cherchées sont gardées (pas de « mémoire
+     insuffisante ») ;
+   - **OpenStreetMap**, pour les hôtels non classés.
+
+   Les hôtels qui ont déjà une adresse sont utilisables **tout de suite**. En parallèle, le script visite leur site
+   pour trouver mieux (recrutement, direction) : l'accueil, /contact, /mentions-legales et /recrutement d'un coup,
+   puis 2 pages de plus seulement si aucune adresse de recrutement n'a été trouvée. 8 analyses tournent en même temps ;
+   la sélection auto attend la fin de la visite d'un site avant de cocher l'hôtel.
+   Si la page est fermée, l'analyse continue en arrière-plan.
 2. La **sélection auto** coche les hôtels dont la meilleure adresse est assez bonne
    (score ≥ `scoreMinimumAuto`) et jamais contactée.
 3. Vérifier d'un coup d'œil : l'adresse (menu avec les autres adresses trouvées, ou « Autre adresse… »),

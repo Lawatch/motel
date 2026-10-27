@@ -32,7 +32,7 @@ function etat() {
   return {
     version: VERSION,
     cv: infoCv_(),
-    aAnalyser: lireHotels_().filter(h => h.statut === 'a_analyser').length,
+    aAnalyser: lireHotels_().filter(aAnalyser_).length,
     compte: compte,
     bonCompte: compte.toLowerCase() === CONFIG.email.toLowerCase(),
     envoyesAujourdhui: envoisDuJour_(),
@@ -45,19 +45,21 @@ function etat() {
 }
 
 // Affichée en haut de la page : si elle ne correspond pas, la page utilise une ancienne version du code
-const VERSION = '5 - lettre ciblée, anti-doublon Gmail';
+const VERSION = '7 - hôtels classés lus par morceaux (mémoire)';
 
 // ============================================================ STOCKAGE (Google Sheet)
 
 const COLS = ['id', 'cle', 'nom', 'ville', 'adresse', 'site', 'etoiles', 'chambres', 'marque', 'segment',
-  'emails', 'email_choisi', 'statut', 'objet_perso', 'corps_perso', 'recherche', 'scanne_le'];
+  'emails', 'email_choisi', 'statut', 'objet_perso', 'corps_perso', 'recherche', 'scanne_le', 'analyse'];
 const COLS_ENVOIS = ['email', 'hotel_id', 'hotel_nom', 'objet', 'envoye_le'];
 
 function classeur_() {
   const props = PropertiesService.getScriptProperties();
   let id = props.getProperty('SHEET_ID');
   if (id) {
-    try { return SpreadsheetApp.openById(id); } catch (e) { /* supprimé : on le recrée */ }
+    let ss = null;
+    try { ss = SpreadsheetApp.openById(id); } catch (e) { /* supprimé : on le recrée */ }
+    if (ss) { majEntetes_(ss); return ss; }
   }
   const ss = SpreadsheetApp.create('Candidatures hôtels - suivi');
   const h = ss.getSheets()[0].setName('Hôtels');
@@ -73,7 +75,21 @@ function classeur_() {
   return ss;
 }
 
+let entetesOk_ = false;
+/** Ajoute les colonnes apparues dans une nouvelle version du script. */
+function majEntetes_(ss) {
+  if (entetesOk_) return;
+  const sh = ss.getSheetByName('Hôtels');
+  if (sh.getLastColumn() < COLS.length) sh.getRange(1, 1, 1, COLS.length).setValues([COLS]);
+  entetesOk_ = true;
+}
+
 function feuille_(nom) { return classeur_().getSheetByName(nom); }
+
+/** Hôtel dont le site reste à visiter (anciennes versions : statut 'a_analyser'). */
+function aAnalyser_(h) {
+  return h.analyse === 'a_faire' || (h.statut === 'a_analyser' && h.analyse !== 'faite');
+}
 
 function lireHotels_() {
   const values = feuille_('Hôtels').getDataRange().getValues();
@@ -117,48 +133,110 @@ function envoisDuJour_() { const j = aujourdhui_(); return lireEnvois_().filter(
 
 // ============================================================ API appelée par la page
 
-/** 1. Liste des hôtels d'une ou plusieurs villes ("Lyon, Annecy, Grenoble"). Les sites sont ensuite
- *  analysés par la page (plusieurs lots en parallèle) et, si la page est fermée, en arrière-plan. */
+/** 1. Hôtels d'une ou plusieurs zones ("Lyon, Annecy", "Paris 8e", "69003", "74" pour un département).
+ *  Deux sources fusionnées : la liste officielle des hôtels classés (Atout France, avec e-mail, étoiles,
+ *  chambres) et OpenStreetMap. Les hôtels déjà dans le suivi ne sont jamais reproposés.
+ *  Les hôtels qui ont déjà une adresse sont utilisables tout de suite ; leurs sites sont visités ensuite
+ *  (par la page, plusieurs lots en parallèle, ou en arrière-plan) pour trouver une adresse recrutement / direction. */
 function scanVille(villes, limite) {
   const liste = String(villes || '').split(/[,;\n]+/).map(v => v.trim()).filter(Boolean);
   if (!liste.length) throw new Error('Indiquez une ville');
-  const parVille = liste.map(v => ({ ville: v, hotels: hotelsOsm_(v).slice(0, limite || 150) }));
+  const stats = { atout: 0, osm: 0, nouveaux: 0, dejaConnus: 0, sansContact: 0, erreurs: [] };
+  let parZone = liste.map(() => []);
+  try { parZone = hotelsAtoutZones_(liste); }   // une seule lecture du fichier pour toutes les zones
+  catch (e) { stats.erreurs.push('Hôtels classés : ' + e.message); }
+  const parVille = liste.map((v, i) => {
+    const af = parZone[i];
+    let osm = [];
+    try { osm = hotelsOsm_(v); } catch (e) { stats.erreurs.push('OpenStreetMap (' + v + ') : ' + e.message); }
+    stats.atout += af.length; stats.osm += osm.length;
+    // les hôtels avec une adresse d'abord, si la limite coupe la liste
+    const tous = af.concat(osm);
+    const avecMail = tous.filter(t => t.emails_source.length), sansMail = tous.filter(t => !t.emails_source.length);
+    return { ville: v, hotels: avecMail.concat(sansMail).slice(0, limite || 400) };
+  });
+  if (stats.erreurs.length === liste.length + 1) throw new Error(stats.erreurs.join(' · '));
+
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  let total = 0, nouveauxTotal = 0, dejaConnus = 0;
   try {
-    const existants = lireHotels_();
-    const parCle = {};
-    existants.forEach(h => { parCle[h.cle] = h; });
+    const existants = lireHotels_(), deja = adressesContactees_();
+    const index = {};
+    existants.forEach(h => clesHotel_(h).forEach(k => { index[k] = h; }));
     let maxId = existants.reduce((m, h) => Math.max(m, Number(h.id) || 0), 0);
-    const nouveaux = [], maj = [];
-    const vus = {};
+    const nouveaux = [], maj = [], comptes = {};
     parVille.forEach(pv => pv.hotels.forEach(t => {
-      if (vus[t.cle]) return;   // même hôtel trouvé pour deux villes voisines
-      vus[t.cle] = true;
-      total++;
-      const h = parCle[t.cle];
-      if (h) {   // déjà dans le suivi (contacté, ignoré ou en attente) : jamais reproposé comme nouveau
-        dejaConnus++;
-        if (h.recherche !== pv.ville && h.statut !== 'envoye') { h.recherche = pv.ville; maj.push(h); }
+      const connu = clesHotel_(t).map(k => index[k]).find(Boolean);
+      if (connu && nouveaux.indexOf(connu) >= 0) { completer_(connu, t); return; }   // vu par l'autre source
+      if (connu) {   // déjà dans le suivi : jamais reproposé
+        if (!comptes[connu.id]) { comptes[connu.id] = true; stats.dejaConnus++; }
+        if (connu.recherche !== pv.ville && connu.statut !== 'envoye' && maj.indexOf(connu) < 0) {
+          connu.recherche = pv.ville; maj.push(connu);
+        }
         return;
       }
-      t.id = ++maxId; t.statut = 'a_analyser'; t.recherche = pv.ville;
-      t.emails = t.emails_osm.map(e => ({ email: e, source: 'OpenStreetMap' }));  // adresse indiquée sur la carte
+      if (!t.site && !t.emails_source.length) { stats.sansContact++; return; }
+      clesHotel_(t).forEach(k => { index[k] = t; });
+      t.recherche = pv.ville;
       nouveaux.push(t);
-      parCle[t.cle] = t;
     }));
+    nouveaux.forEach(t => {
+      t.id = ++maxId;
+      t.marque = detecterChaine_(t);
+      t.segment = segment_(t);
+      const sources = {};
+      t.emails_source.forEach(e => { sources[e.email] = e.source; });
+      t.emails = classer_(sources, t.site, {});
+      t.analyse = t.site ? 'a_faire' : 'faite';
+      t.statut = t.emails.length ? 'nouveau' : 'a_analyser';
+      t.scanne_le = maintenant_();
+      choisirAdresseLibre_(t, deja);
+    });
     if (nouveaux.length) {
       const sh = feuille_('Hôtels');
       sh.getRange(sh.getLastRow() + 1, 1, nouveaux.length, COLS.length).setNumberFormat('@').setValues(nouveaux.map(ligne_));
     }
     ecrireHotels_(maj);
-    nouveauxTotal = nouveaux.length;
+    stats.nouveaux = nouveaux.length;
+    stats.prets = nouveaux.filter(t => t.statut === 'nouveau').length;
   } finally {
     lock.releaseLock();
   }
-  if (nouveauxTotal) assurerDeclencheur_();
-  return { recherches: liste, total: total, nouveaux: nouveauxTotal, dejaConnus: dejaConnus };
+  if (stats.nouveaux) assurerDeclencheur_();
+  stats.recherches = liste;
+  return stats;
+}
+
+/** Complète un hôtel trouvé par une source avec ce que l'autre source sait en plus. */
+function completer_(h, autre) {
+  if (!h.site && autre.site) h.site = autre.site;
+  ['etoiles', 'chambres', 'adresse', 'marque'].forEach(k => { if (!h[k] && autre[k]) h[k] = autre[k]; });
+  autre.emails_source.forEach(e => { if (!h.emails_source.some(x => x.email === e.email)) h.emails_source.push(e); });
+}
+
+// Sites partagés par tout un réseau : ils n'identifient pas un hôtel
+const DOMAINES_PARTAGES = /(^|\.)(accor\.com|hotel-bb\.com|bestwestern\.[a-z]+|marriott\.com|hilton\.com|ihg\.com|louvrehotels\.com|choicehotels\.[a-z]+|radissonhotels\.com|hyatt\.com|logishotels\.com|booking\.com|facebook\.com|google\.[a-z]+|tripadvisor\.[a-z]+|wixsite\.com|business\.site|appartcity\.com|adagio-city\.com|citadines\.com|campanile\.com|kyriad\.com|premiereclasse\.com|brithotel\.fr|fasthotel\.com|hotelf1\.com|ibis\.com|mercure\.com|novotel\.com)$/;
+
+/** Clés qui identifient un hôtel quelle que soit la source : identifiant, site, nom + ville. */
+function clesHotel_(h) {
+  const cles = [h.cle];
+  const dom = domaineSite_(normaliserUrl_(h.site));
+  if (dom && !DOMAINES_PARTAGES.test(dom)) cles.push('site:' + dom);
+  const nom = cleNom_(h.nom), ville = normaliser_(h.ville).replace(/ \d.*$/, '');
+  if (nom) cles.push('nom:' + nom + '|' + ville);
+  return cles;
+}
+
+const MOTS_VIDES = ['HOTEL', 'HOTELS', 'THE', 'LE', 'LA', 'LES', 'L', 'DE', 'DU', 'DES', 'D', 'ET', 'AND', 'AU', 'AUX', 'SPA', 'RESTAURANT'];
+function cleNom_(nom) {
+  return normaliser_(nom).split(' ').filter(m => m && MOTS_VIDES.indexOf(m) < 0).join(' ');
+}
+
+/** Majuscules, sans accents, ponctuation -> espace, "ST" -> "SAINT". */
+function normaliser_(s) {
+  return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase()
+    .replace(/&/g, ' ET ').replace(/[^A-Z0-9]+/g, ' ').trim()
+    .replace(/(^| )STE( |$)/g, '$1SAINTE$2').replace(/(^| )ST( |$)/g, '$1SAINT$2');
 }
 
 /** 2. Analyse les prochains hôtels en attente. Plusieurs appels peuvent tourner en même temps :
@@ -169,7 +247,7 @@ function analyserProchains(n) {
   let lot;
   lock.waitLock(30000);
   try {
-    const attente = lireHotels_().filter(h => h.statut === 'a_analyser');
+    const attente = lireHotels_().filter(aAnalyser_);
     const pris = cache.getAll(attente.map(h => 'analyse_' + h.id));
     lot = attente.filter(h => !pris['analyse_' + h.id]).slice(0, n || 8);
     const marques = {};
@@ -186,10 +264,13 @@ function analyserProchains(n) {
     lireHotels_().forEach(h => { frais[h.id] = h; });
     const aEcrire = lot.filter(h => frais[h.id]).map(h => {
       const f = frais[h.id];
+      const auto = !f.email_choisi || f.email_choisi === (f.emails[0] || {}).email;   // pas choisie à la main
       Object.assign(f, {
-        emails: h.emails, chambres: h.chambres, etoiles: h.etoiles, marque: h.marque, segment: h.segment,
-        statut: f.statut === 'a_analyser' ? 'nouveau' : f.statut, scanne_le: maintenant_(),
+        emails: h.emails, chambres: f.chambres || h.chambres, etoiles: f.etoiles || h.etoiles, marque: h.marque,
+        segment: h.segment, analyse: 'faite', scanne_le: maintenant_(),
       });
+      if (f.statut === 'a_analyser' || f.statut === 'deja_contacte') { f.statut = 'nouveau'; f.email_choisi = null; }
+      else if (f.statut === 'nouveau' && auto) f.email_choisi = null;   // la visite du site a pu trouver mieux
       choisirAdresseLibre_(f, deja);
       return f;
     });
@@ -205,7 +286,7 @@ function traiterFileAttente() {
   const debut = Date.now();
   while (Date.now() - debut < 4 * 60 * 1000) {
     if (!analyserProchains(10)) {
-      if (!lireHotels_().some(h => h.statut === 'a_analyser')) supprimerDeclencheur_();
+      if (!lireHotels_().some(aAnalyser_)) supprimerDeclencheur_();
       return;
     }
   }
@@ -424,6 +505,13 @@ function installer() {
   const ss = classeur_();
   const cv = cvBlob_().setName(nomFichierCv_('Hôtel Exemple', CONFIG, '.pdf'));
   ScriptApp.getProjectTriggers();   // autorisation pour l'analyse en arrière-plan
+  try {
+    const f = verifierAtout_();
+    Logger.log('Hôtels classés (Atout France) : fichier trouvé (' + f.taille + (f.parMorceaux ? ', lu par morceaux' : '') +
+      '). Colonnes : ' + f.colonnes);
+  } catch (e) {
+    Logger.log('✘ Liste des hôtels classés indisponible (' + e.message + ') : le scan utilisera OpenStreetMap seul.');
+  }
   Logger.log('Candidatures retrouvées dans Gmail et ajoutées au suivi : ' + synchroniserEnvoisGmail());
   const compte = Session.getEffectiveUser().getEmail();
   Logger.log('Suivi : ' + ss.getUrl());
@@ -437,17 +525,289 @@ function installer() {
   Logger.log('Quota Gmail restant aujourd\'hui : ' + MailApp.getRemainingDailyQuota());
 }
 
+/** Diagnostic à lancer depuis l'éditeur : nombre d'hôtels par source et vitesse d'analyse sur une ville,
+ *  sans rien enregistrer ni envoyer. Changez la ville ci-dessous si besoin. */
+function testerSources() {
+  const ville = 'Lyon';
+  let t = Date.now();
+  const af = hotelsAtout_(ville);
+  Logger.log('Hôtels classés : ' + af.length + ' à ' + ville + ', dont ' + af.filter(h => h.emails_source.length).length +
+    ' avec e-mail et ' + af.filter(h => h.site).length + ' avec site (' + (Date.now() - t) + ' ms)');
+  t = Date.now();
+  let osm = [];
+  try { osm = hotelsOsm_(ville); } catch (e) { Logger.log('OpenStreetMap : ' + e.message); }
+  Logger.log('OpenStreetMap : ' + osm.length + ' hôtels (' + (Date.now() - t) + ' ms)');
+  const lot = af.filter(h => h.site).slice(0, 8).map(h => Object.assign({}, h, {
+    emails: h.emails_source.map(e => ({ email: e.email, source: e.source })) }));
+  t = Date.now();
+  crawlLot_(lot);
+  Logger.log('Analyse de ' + lot.length + ' sites : ' + Math.round((Date.now() - t) / 1000) + ' s');
+  lot.forEach(h => Logger.log('  ' + h.nom + ' -> ' + (h.emails[0] ? h.emails[0].email + ' (' + h.emails[0].raisons.join(', ') + ')' : 'aucune adresse')));
+}
+
+// ============================================================ ZONE DE RECHERCHE
+
+/** "Lyon" / "Paris 8e" / "75008" / "69" (département) -> description de la zone */
+function analyserZone_(saisie) {
+  const brut = String(saisie || '').trim(), n = normaliser_(brut);
+  if (/^\d{5}$/.test(brut)) return { type: 'cp', codes: [brut], nom: brut };
+  if (/^(\d{2}|2A|2B|97\d)$/i.test(brut)) return { type: 'dept', code: brut.toUpperCase(), nom: 'département ' + brut.toUpperCase() };
+  const a = n.match(/^(PARIS|LYON|MARSEILLE) (\d{1,2})( ?(E|EME|ER|ERE))?( ARRONDISSEMENT)?$/);
+  if (a) {
+    const num = Number(a[2]), pad = (num < 10 ? '0' : '') + num;
+    const codes = a[1] === 'PARIS' ? ['750' + pad].concat(num === 16 ? ['75116'] : [])
+      : a[1] === 'LYON' ? ['6900' + num] : ['130' + pad];
+    return { type: 'cp', codes: codes, nom: brut, ville: a[1].charAt(0) + a[1].slice(1).toLowerCase(), arrondissement: num };
+  }
+  return { type: 'commune', nom: brut, n: n };
+}
+
+function dansZone_(zone, cp, commune) {
+  cp = String(cp || '').trim();
+  if (zone.type === 'cp') return zone.codes.indexOf(cp) >= 0;
+  if (zone.type === 'dept') {
+    const d = zone.code === '2A' || zone.code === '2B' ? '20' : zone.code;
+    return cp.length === 5 && cp.indexOf(d) === 0;
+  }
+  const c = normaliser_(commune);
+  return c === zone.n || c.replace(/ CEDEX.*$/, '') === zone.n ||
+    c.replace(/ \d+( ?(E|EME|ER|ERE))?( ARRONDISSEMENT)?$/, '') === zone.n;
+}
+
+// ============================================================ HÔTELS CLASSÉS (Atout France, data.gouv.fr)
+// Liste officielle de tous les hôtels classés en France, avec e-mail, site, étoiles et chambres.
+// Le fichier national est gros (toute la France, campings compris) : il n'est JAMAIS chargé en entier.
+// Il est lu par morceaux de 1 Mo (plusieurs morceaux en parallèle) et seules les lignes des zones
+// cherchées sont gardées. La mémoire utilisée reste faible quelle que soit la taille du fichier.
+
+const DATAGOUV = 'https://www.data.gouv.fr/api/1/datasets/';
+const ATOUT_SLUGS = ['hebergements-collectifs-classes-en-france', 'hebergements-touristiques-classes-en-france',
+  'liste-des-hebergements-touristiques-classes'];
+const ATOUT = { morceau: 1024 * 1024, enParallele: 4, maxMorceaux: 200 };
+
+/** Adresse du fichier CSV, gardée 6 h en cache pour ne pas interroger data.gouv.fr à chaque scan. */
+function urlAtout_() {
+  const cache = CacheService.getScriptCache();
+  let url = cache.get('ATOUT_URL');
+  if (!url) { url = trouverCsvAtout_(); cache.put('ATOUT_URL', url, 6 * 3600); }
+  return url;
+}
+
+function telechargerMorceaux_(url, debuts) {
+  const req = debuts.map(d => ({ url: url, muteHttpExceptions: true, followRedirects: true,
+    headers: { Range: 'bytes=' + d + '-' + (d + ATOUT.morceau - 1) } }));
+  return req.length === 1 ? [UrlFetchApp.fetch(req[0].url, req[0])] : UrlFetchApp.fetchAll(req);
+}
+
+/** Lit le fichier morceau par morceau et appelle traiterLigne(ligne) pour chaque ligne, dans l'ordre.
+ *  Les morceaux sont lus en ISO-8859-1 (un octet = un caractère, aucun caractère coupé entre deux morceaux) ;
+ *  chaque ligne est ensuite redécodée en UTF-8 si le fichier est en UTF-8. */
+function lireParMorceaux_(url, traiterLigne) {
+  let reste = '', total = Infinity, debut = 0, n = 0;
+  const ligneSuivante = brut => {
+    let l = brut.replace(/\r$/, '');
+    // UTF-8 valide -> redécodée ; sinon le fichier est en ISO-8859-1 et la ligne est déjà juste
+    try { l = decodeURIComponent(escape(l)); } catch (e) { /* ligne laissée telle quelle */ }
+    traiterLigne(l);
+  };
+  while (debut < total && n < ATOUT.maxMorceaux) {
+    const debuts = [];
+    for (let k = 0; k < (n ? ATOUT.enParallele : 1) && debut + k * ATOUT.morceau < total; k++) debuts.push(debut + k * ATOUT.morceau);
+    const reps = telechargerMorceaux_(url, debuts);
+    let fini = false;
+    for (const r of reps) {
+      const code = r.getResponseCode();
+      if (code === 416) { fini = true; break; }
+      if (code !== 206 && code !== 200) throw new Error('téléchargement impossible (code ' + code + ')');
+      const plage = String(r.getHeaders()['Content-Range'] || r.getHeaders()['content-range'] || '');
+      const m = plage.match(/\/(\d+)$/);
+      if (m) total = Number(m[1]);
+      const texte = r.getContentText('ISO-8859-1');
+      const lignes = (reste + texte).split('\n');
+      reste = lignes.pop();
+      lignes.forEach(ligneSuivante);
+      n++;
+      // serveur qui ignore les plages : il a tout envoyé d'un coup
+      if (code === 200 || texte.length < ATOUT.morceau) { fini = true; break; }
+    }
+    if (fini) break;
+    debut += debuts.length * ATOUT.morceau;
+  }
+  if (reste) ligneSuivante(reste);
+}
+
+/** Découpe une ligne CSV (gère les "guillemets" et les "" doublés). */
+function champsCsv_(ligne, sep) {
+  const out = [];
+  let champ = '', guill = false;
+  for (let i = 0; i < ligne.length; i++) {
+    const ch = ligne.charAt(i);
+    if (guill) {
+      if (ch === '"' && ligne.charAt(i + 1) === '"') { champ += '"'; i++; } else if (ch === '"') guill = false; else champ += ch;
+    } else if (ch === '"') guill = true;
+    else if (ch === sep) { out.push(champ); champ = ''; }
+    else champ += ch;
+  }
+  out.push(champ);
+  return out;
+}
+
+/** Repère les colonnes utiles d'après l'en-tête du fichier. */
+function colonnesAtout_(entete) {
+  const brut = sansBom_(entete).replace(/^ï»¿/, '');   // BOM lu en ISO-8859-1
+  const sep = (brut.match(/;/g) || []).length > (brut.match(/,/g) || []).length ? ';' : ',';
+  const noms = champsCsv_(brut, sep);
+  const h = noms.map(normaliser_);
+  const col = (re, sauf) => h.findIndex(x => re.test(x) && !(sauf && sauf.test(x)));
+  const c = {
+    typo: col(/TYPOLOGIE|TYPE D ?HEBERGEMENT/), etoiles: col(/^CLASSEMENT|ETOILE/, /DATE/), nom: col(/NOM COMMERCIAL|^NOM/),
+    adresse: col(/ADRESSE/, /MAIL|COURRIEL|INTERNET|WEB/), cp: col(/CODE POSTAL/), commune: col(/COMMUNE|VILLE/, /CODE/),
+    site: col(/SITE INTERNET|SITE WEB|^SITE|INTERNET|URL/), email: col(/COURRIEL|MAIL/), chambres: col(/CHAMBRES/),
+  };
+  if (c.nom < 0 || (c.cp < 0 && c.commune < 0)) throw new Error('colonnes inattendues : ' + noms.join(' | '));
+  c.sep = sep;
+  c.description = Object.keys(c).filter(k => typeof c[k] === 'number' && c[k] >= 0).map(k => k + '=' + noms[c[k]]).join(', ');
+  return c;
+}
+
+/** Filtre rapide sur la ligne normalisée, avant de la découper : élimine 99 % des lignes. */
+function prefiltreZone_(zone) {
+  if (zone.type === 'cp') return n => zone.codes.some(cp => n.indexOf(' ' + cp + ' ') >= 0 || n.indexOf(cp + ' ') === 0);
+  if (zone.type === 'dept') {
+    const re = new RegExp('(^| )' + (zone.code === '2A' || zone.code === '2B' ? '20' : zone.code) + '\\d{' + (zone.code.length === 3 ? 2 : 3) + '}( |$)');
+    return n => re.test(n);
+  }
+  return n => (' ' + n + ' ').indexOf(' ' + zone.n + ' ') >= 0;
+}
+
+/** Hôtels classés de plusieurs zones en une seule lecture du fichier. Retourne une liste par zone. */
+function hotelsAtoutZones_(saisies) {
+  const zones = saisies.map(analyserZone_);
+  const filtres = zones.map(prefiltreZone_);
+  const resultats = zones.map(() => []);
+  let c = null, attente = '';
+  lireParMorceaux_(urlAtout_(), ligne => {
+    if (!c) { c = colonnesAtout_(ligne); return; }
+    if (attente) { ligne = attente + '\n' + ligne; attente = ''; }
+    if (((ligne.match(/"/g) || []).length) % 2) { attente = ligne; return; }   // retour à la ligne dans un champ
+    const n = normaliser_(ligne);
+    if (n.indexOf('HOTEL') < 0) return;
+    const quelles = filtres.map((f, i) => (f(n) ? i : -1)).filter(i => i >= 0);
+    if (!quelles.length) return;
+    const l = champsCsv_(ligne, c.sep);
+    const v = k => (c[k] >= 0 ? String(l[c[k]] || '').trim() : '');
+    if (c.typo >= 0 && !/HOTEL/.test(normaliser_(v('typo')))) return;   // campings, résidences... exclus
+    quelles.forEach(i => {
+      if (!dansZone_(zones[i], v('cp'), v('commune'))) return;
+      resultats[i].push(hotelDepuisAtout_(zones[i], {
+        nom: v('nom'), adresse: v('adresse'), cp: v('cp'), commune: v('commune'), site: v('site'),
+        email: (v('email').toLowerCase().match(EMAIL_RE) || [])[0] || '', etoiles: entier_(v('etoiles')), chambres: entier_(v('chambres')),
+      }));
+    });
+  });
+  if (!c) throw new Error('fichier vide');
+  return resultats;
+}
+
+function hotelsAtout_(saisie) { return hotelsAtoutZones_([saisie])[0]; }
+
+function hotelDepuisAtout_(zone, x) {
+  return {
+    cle: 'af:' + cleNom_(x.nom) + '|' + x.cp,
+    nom: joliNom_(x.nom),
+    ville: zone.ville || (zone.type === 'commune' && normaliser_(x.commune) === zone.n ? zone.nom : joliNom_(x.commune).replace(/ Cedex.*$/i, '')),
+    adresse: [joliNom_(x.adresse), x.cp].filter(Boolean).join(', '),
+    site: x.site, etoiles: x.etoiles, chambres: x.chambres, marque: '',
+    emails_source: x.email ? [{ email: x.email, source: 'liste officielle des hôtels classés' }] : [],
+  };
+}
+
+/** Pour installer() : vérifie le fichier en ne lisant que son début. */
+function verifierAtout_() {
+  const url = urlAtout_();
+  const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true, headers: { Range: 'bytes=0-65535' } });
+  if (r.getResponseCode() !== 206 && r.getResponseCode() !== 200) throw new Error('code ' + r.getResponseCode());
+  const debut = r.getContentText('ISO-8859-1');
+  const c = colonnesAtout_(debut.slice(0, debut.indexOf('\n')).replace(/\r$/, ''));
+  const plage = String(r.getHeaders()['Content-Range'] || r.getHeaders()['content-range'] || '');
+  const taille = (plage.match(/\/(\d+)$/) || [])[1];
+  return { url: url, colonnes: c.description, taille: taille ? Math.round(taille / 1024 / 1024) + ' Mo' : 'inconnue',
+    parMorceaux: r.getResponseCode() === 206 };
+}
+
+function getJson_(url) {
+  const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  return r.getResponseCode() === 200 ? JSON.parse(r.getContentText()) : null;
+}
+
+/** Trouve le fichier CSV des hôtels classés sur data.gouv.fr (par son adresse connue, sinon par recherche). */
+function trouverCsvAtout_() {
+  const jeux = [];
+  ATOUT_SLUGS.forEach(sl => { try { const d = getJson_(DATAGOUV + sl + '/'); if (d) jeux.push(d); } catch (e) { /* suivant */ } });
+  if (!jeux.length) {
+    const r = getJson_(DATAGOUV + '?q=' + encodeURIComponent('hébergements classés') + '&page_size=20') || { data: [] };
+    const atout = d => (/ATOUT/.test(normaliser_((d.organization || {}).name)) ? 1 : 0);
+    r.data.filter(d => /HEBERGEMENT/.test(normaliser_(d.title)) && /CLASSE/.test(normaliser_(d.title)))
+      .sort((a, b) => atout(b) - atout(a)).forEach(d => jeux.push(d));
+  }
+  for (const d of jeux) {
+    const csv = (d.resources || []).filter(r => /csv/i.test(r.format || '') || /\.csv(\?|$)/i.test(r.url || ''));
+    if (!csv.length) continue;
+    // une ressource "hôtels" si elle existe, sinon le fichier le plus récent
+    const hotel = r => (/HOTEL/.test(normaliser_(r.title)) ? 1 : 0);
+    csv.sort((a, b) => hotel(b) - hotel(a) || String(b.last_modified || '').localeCompare(String(a.last_modified || '')));
+    return csv[0].url;
+  }
+  throw new Error('jeu de données introuvable sur data.gouv.fr');
+}
+
+/** Retire la marque d'octets (BOM) en tête de fichier. */
+function sansBom_(texte) {
+  texte = texte.replace(/^﻿/, '');
+  return texte;
+}
+
+const PETITS_MOTS = ['de', 'du', 'des', 'la', 'le', 'les', 'et', 'au', 'aux', 'en', 'sur', 'sous', 'à', 'a', 'par'];
+
+function majuscule_(mot) {
+  return mot.split('-').map(p => p.replace(/^([^a-zà-ÿ]*)([a-zà-ÿ])/, (x, avant, l) => avant + l.toUpperCase())).join('-');
+}
+
+/** "HOTEL DU PARC" -> "Hôtel du Parc", "IBIS LYON CENTRE" -> "ibis Lyon Centre". Un nom déjà en minuscules reste tel quel. */
+function joliNom_(s) {
+  s = String(s || '').trim().replace(/\s+/g, ' ');
+  if (!s || s !== s.toUpperCase()) return s;
+  return s.toLowerCase().split(' ').map((mot, i) => {
+    if (mot === 'hotel' || mot === 'hôtel') return i ? 'hôtel' : 'Hôtel';
+    if (mot === 'hotels' || mot === 'hôtels') return i ? 'hôtels' : 'Hôtels';
+    if (mot === 'ibis') return 'ibis';
+    if (/^(b&b|bw|ii|iii|iv)$/.test(mot)) return mot.toUpperCase();
+    if (i && PETITS_MOTS.indexOf(mot) >= 0) return mot;
+    const art = mot.match(/^([ld])['’](.+)$/);   // l'escale, d'angleterre
+    if (art) return (i ? art[1] : art[1].toUpperCase()) + "'" + majuscule_(art[2]);
+    return majuscule_(mot);
+  }).join(' ').replace(/\bibis Budget\b/, 'ibis budget');
+}
+
 // ============================================================ OPENSTREETMAP
 
 const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
 
-function hotelsOsm_(ville) {
-  const nom = ville.replace(/[\\^$.*+?()[\]{}|"]/g, '\\$&');
+function hotelsOsm_(saisie) {
+  const zone = analyserZone_(saisie);
+  let filtre;
+  if (zone.type === 'dept') filtre = '["admin_level"="6"]["ref"="' + zone.code + '"]';
+  else if (zone.type === 'cp') {
+    if (!zone.ville) return [];   // simple code postal : la liste officielle suffit
+    filtre = '["admin_level"~"^(9|10)$"]["name"~"^' + zone.ville + ' ' + zone.arrondissement + '(e|er)",i]';
+  } else {
+    filtre = '["admin_level"~"^(8|9|10)$"]["name"~"^' + zone.nom.replace(/[\\^$.*+?()[\]{}|"]/g, '\\$&') + '$",i]';
+  }
   const q = '[out:json][timeout:90];' +
     'area["ISO3166-1"="FR"][admin_level=2]->.fr;' +
-    'rel(area.fr)["boundary"="administrative"]["admin_level"~"^(8|9|10)$"]["name"~"^' + nom + '$",i];' +
+    'rel(area.fr)["boundary"="administrative"]' + filtre + ';' +
     'map_to_area->.a;' +
-    '(nwr["tourism"="hotel"](area.a);nwr["tourism"="guest_house"]["website"](area.a););' +
+    'nwr["tourism"~"^(hotel|motel)$"](area.a);' +
     'out center tags;';
   let data = null, erreur = '';
   for (const url of OVERPASS) {
@@ -457,8 +817,8 @@ function hotelsOsm_(ville) {
       erreur = 'code ' + r.getResponseCode();
     } catch (e) { erreur = e.message; }
   }
-  if (!data) throw new Error('OpenStreetMap ne répond pas (' + erreur + '), réessayez dans une minute.');
-  return hotelsDepuisOsm_(data, ville);
+  if (!data) throw new Error('ne répond pas (' + erreur + ')');
+  return hotelsDepuisOsm_(data, zone.ville || zone.nom);
 }
 
 function hotelsDepuisOsm_(data, ville) {
@@ -468,7 +828,6 @@ function hotelsDepuisOsm_(data, ville) {
     if (!t.name) return;
     const site = t.website || t['contact:website'] || t.url || '';
     const mail = t.email || t['contact:email'] || '';
-    if (!site && !mail) return;
     out.push({
       cle: 'osm:' + el.type + '/' + el.id,
       nom: t.name.trim(),
@@ -477,7 +836,8 @@ function hotelsDepuisOsm_(data, ville) {
       site: site.trim(),
       etoiles: entier_(t.stars), chambres: entier_(t.rooms),
       marque: t.brand || '',
-      emails_osm: mail.split(/[;,\s]+/).filter(e => e.indexOf('@') > 0).map(e => e.toLowerCase()),
+      emails_source: mail.split(/[;,\s]+/).filter(e => e.indexOf('@') > 0)
+        .map(e => ({ email: e.toLowerCase(), source: 'OpenStreetMap' })),
     });
   });
   return out;
@@ -492,7 +852,10 @@ const LIENS_RECRUTEMENT = /recrut|emploi|carri[eè]re|career|jobs?\b|rejoin|nous
 const LIENS_MENTIONS = /mention|legal|impressum/i;
 const LIENS_CONTACT = /contact|nous-ecrire|acces|nous-trouver/i;
 const PAGES_PRIORITAIRES = /recrut|emploi|carri|job|rejoin|candidature|mention|legal/i;
-const MAX_SOUS_PAGES = 3;
+const MAX_SOUS_PAGES = 2;
+// Pages essayées dès la première vague, en même temps que l'accueil (les plus courantes sur les sites d'hôtels)
+const CHEMINS_DEVINES = ['/contact', '/mentions-legales', '/recrutement'];
+const SCORE_SUFFISANT = 55;   // adresse RH / recrutement trouvée : inutile de visiter d'autres pages
 
 /** Récupère plusieurs URLs en parallèle. Une URL en erreur donne null (sans bloquer les autres). */
 function recupererPages_(urls) {
@@ -512,26 +875,40 @@ function recupererPages_(urls) {
   });
 }
 
+/** Visite les sites d'un lot d'hôtels. Vague 1 (tout le lot en parallèle) : l'accueil + /contact,
+ *  /mentions-legales, /recrutement. Vague 2, seulement si aucune adresse RH / recrutement n'a été trouvée :
+ *  2 pages de plus repérées dans les liens de l'accueil (recrutement, mentions légales, contact). */
 function crawlLot_(hotels) {
   hotels.forEach(h => {
     h._trouves = {};
     (h.emails || []).forEach(c => { if (c.source !== 'déduite') h._trouves[c.email] = c.source; });
     h._infos = { chambres: null, etoiles: null };
     h._contexte = {};
+    h._vues = {};
     h.site = normaliserUrl_(h.site);
   });
-  const avecSite = hotels.filter(h => h.site);
-  const accueils = recupererPages_(avecSite.map(h => h.site));
-  const sous = [];
-  avecSite.forEach((h, i) => {
-    const html = accueils[i];
-    if (!html) return;
-    recolter_(html, h.site, h);
-    liensUtiles_(html, h.site).forEach(u => sous.push({ h: h, url: u }));
+  const vague1 = [];
+  hotels.filter(h => h.site).forEach(h => {
+    vague1.push({ h: h, url: h.site, accueil: true });
+    const racine = (h.site.match(/^https?:\/\/[^/?#]+/i) || [''])[0];
+    if (racine && !DOMAINES_PARTAGES.test(domaineSite_(racine))) {
+      CHEMINS_DEVINES.forEach(p => vague1.push({ h: h, url: racine + p }));
+    }
   });
-  const pages = recupererPages_(sous.map(s => s.url));
-  sous.forEach((s, i) => { if (pages[i]) recolter_(pages[i], s.url, s.h); });
-  hotels.forEach(finaliserHotel_);
+  vague1.forEach(v => { v.h._vues[v.url.replace(/\/$/, '')] = true; });
+  const pages1 = recupererPages_(vague1.map(v => v.url));
+  vague1.forEach((v, i) => { if (pages1[i]) recolter_(pages1[i], v.url, v.h); });
+  const vague2 = [];
+  vague1.forEach((v, i) => {
+    if (!v.accueil || !pages1[i]) return;
+    const meilleur = classer_(v.h._trouves, v.h.site, v.h._contexte)[0];
+    if (meilleur && meilleur.score >= SCORE_SUFFISANT) return;
+    liensUtiles_(pages1[i], v.h.site).filter(u => !v.h._vues[u.replace(/\/$/, '')]).slice(0, MAX_SOUS_PAGES)
+      .forEach(u => vague2.push({ h: v.h, url: u }));
+  });
+  const pages2 = recupererPages_(vague2.map(v => v.url));
+  vague2.forEach((v, i) => { if (pages2[i]) recolter_(pages2[i], v.url, v.h); });
+  hotels.forEach(h => { delete h._vues; finaliserHotel_(h); });
   return hotels;
 }
 
@@ -555,7 +932,6 @@ function liensUtiles_(html, base) {
     const rang = LIENS_RECRUTEMENT.test(libelle) ? 0 : LIENS_MENTIONS.test(libelle) ? 1 : LIENS_CONTACT.test(libelle) ? 2 : -1;
     if (rang >= 0) { vus[url] = true; liens.push({ url: url, rang: rang }); }
   }
-  if (!liens.some(l => l.rang === 2)) liens.push({ url: resoudreUrl_(base, '/contact'), rang: 3 });
   liens.sort((a, b) => a.rang - b.rang);
   return liens.slice(0, MAX_SOUS_PAGES).map(l => l.url);
 }

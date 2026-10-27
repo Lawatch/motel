@@ -58,11 +58,12 @@
 
 <main>
   <div class="bar">
-    <input type="text" id="ville" placeholder="Une ou plusieurs villes : Lyon, Annecy, Paris 8e Arrondissement" size="48">
-    <input type="number" id="limite" value="120" min="10" max="400" title="Nombre max d'hôtels" style="width:80px">
+    <input type="text" id="ville" placeholder="Villes, arrondissements, codes postaux ou départements : Lyon, Paris 8e, 69003, 74" size="60">
+    <input type="number" id="limite" value="400" min="10" max="3000" title="Nombre max d'hôtels par zone" style="width:80px">
     <button class="primary" id="btnScan">Scanner</button>
     <progress id="prog" value="0" max="1" hidden></progress><span id="progTxt" class="small"></span>
   </div>
+  <div class="bar"><span id="scanInfo" class="small"></span></div>
   <div class="bar">
     <select id="recherche"></select>
     <label class="small"><input type="checkbox" id="masquer" checked> masquer envoyés / ignorés / sans adresse</label>
@@ -111,7 +112,7 @@
 const $ = s => document.querySelector(s);
 const SEG = {independant:"Indépendant", intermediaire:"Indépendant moyen / 4★", groupe:"Chaîne", economique:"Économique",
              residence:"Résidence / appart'hôtel", luxe:"Luxe 5★"};
-const LOT = 6, EN_PARALLELE = 6;  // 6 appels Apps Script en même temps, 6 hôtels chacun
+const LOT = 8, EN_PARALLELE = 8;  // 8 appels Apps Script en même temps, 8 hôtels chacun
 let hotels = [], selected = new Set(), considered = new Set(), state = {}, current = null;
 let stop = false, sending = false, scanning = false;
 
@@ -167,6 +168,7 @@ function autoSelect(reset = true) {
   const seen = new Set(hotels.filter(h => selected.has(h.id)).map(h => h.email_choisi));
   for (const h of visible()) {
     if (!sendable(h) || considered.has(h.id)) continue;
+    if (h.analyse === "a_faire") continue;   // on attend la visite du site : elle trouve souvent mieux (recrutement, direction)
     considered.add(h.id);   // un hôtel décoché à la main n'est pas recoché au rafraîchissement suivant
     if (chosenScore(h) < state.scoreMin || seen.has(h.email_choisi)) continue;
     seen.add(h.email_choisi); selected.add(h.id);   // même adresse pour 2 hôtels (chaîne) : une seule fois
@@ -183,7 +185,7 @@ function render() {
     const c = h.emails.find(c => c.email === h.email_choisi);
     const statut = h.statut === "envoye" ? "Envoyé" : h.statut === "deja_contacte" || h.deja_envoye ? "Déjà contacté" :
                    h.statut === "ignore" ? "Ignoré" :
-                   h.statut === "a_analyser" ? "Non analysé" : "";
+                   h.analyse === "a_faire" ? "Visite du site…" : "";
     return `<tr data-id="${h.id}" class="${selected.has(h.id) ? "sel" : ""} ${sendable(h) ? "" : "done"}">
       <td><input type="checkbox" class="chk" ${selected.has(h.id) ? "checked" : ""} ${sendable(h) ? "" : "disabled"}></td>
       <td class="nom"><div>${esc(h.nom)}</div><a href="${esc(h.site)}" target="_blank">${esc(h.ville || "")} · ${esc((h.site || "").replace(/^https?:\/\/(www\.)?/, "").slice(0, 40))}</a></td>
@@ -192,7 +194,7 @@ function render() {
       <td>${h.etoiles ? h.etoiles + "★" : "–"} / ${h.chambres || "–"}</td>
       <td class="email">${h.emails.length ? `<select class="mail">${opts}<option value="__autre">Autre adresse…</option></select>` :
           `<button class="autre">Saisir une adresse</button>`}
-          <div class="why">${c ? esc(c.raisons.join(" · ")) : ""}${partage[h.email_choisi] > 1 ? ` <span class="warn">adresse partagée avec un autre hôtel</span>` : ""}</div></td>
+          <div class="why">${c ? esc(c.raisons.concat(/^http/.test(c.source || "") || !c.source ? [] : [c.source]).join(" · ")) : ""}${partage[h.email_choisi] > 1 ? ` <span class="warn">adresse partagée avec un autre hôtel</span>` : ""}</div></td>
       <td>${statut}</td>
       <td><button class="voir">Aperçu</button> ${sendable(h) ? `<button class="ign" title="Ne plus proposer cet hôtel">✕</button>` : ""}</td></tr>`;
   }).join("");
@@ -265,7 +267,10 @@ $("#btnScan").onclick = async () => {
   try {
     progress(0, 1, "Recherche des hôtels sur OpenStreetMap…");
     const r = await run("scanVille", villes, +$("#limite").value);
-    $("#progTxt").textContent = `${r.nouveaux} nouveaux hôtels` + (r.dejaConnus ? ` · ${r.dejaConnus} déjà dans le suivi, ignorés` : "");
+    $("#scanInfo").textContent = `${r.nouveaux} nouveaux hôtels (${r.prets} avec une adresse tout de suite)` +
+      ` · sources : ${r.atout} hôtels classés, ${r.osm} OpenStreetMap` +
+      (r.dejaConnus ? ` · ${r.dejaConnus} déjà dans le suivi, ignorés` : "") +
+      (r.erreurs.length ? ` · ${r.erreurs.join(" · ")}` : "");
     await loadRecherches(r.recherches.length === 1 ? r.recherches[0] : "");
     await loadHotels();
     analyser();
@@ -290,7 +295,7 @@ async function analyser() {
       if (!n) return;
       fait += n;
       progress(fait, total, `${fait} / ${total} sites analysés - vous pouvez déjà envoyer`);
-      if (Date.now() - dernierRefresh > 4000) { dernierRefresh = Date.now(); await loadHotels(); autoSelect(false); }
+      if (Date.now() - dernierRefresh > 6000) { dernierRefresh = Date.now(); await loadHotels(); autoSelect(false); }
     }
   };
   await Promise.all(Array.from({length: EN_PARALLELE}, worker));

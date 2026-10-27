@@ -3,11 +3,42 @@
 const fs = require('fs'), path = require('path'), vm = require('vm'), assert = require('assert');
 const DIR = path.join(__dirname, '..', 'apps-script'), SITE = path.join(__dirname, 'site');
 
+// Extrait de la liste des hôtels classés (même forme que le fichier d'Atout France)
+const CSV_ATOUT = [
+  'DATE DE CLASSEMENT;TYPOLOGIE ÉTABLISSEMENT;CLASSEMENT;NOM COMMERCIAL;ADRESSE;CODE POSTAL;COMMUNE;SITE INTERNET;COURRIEL;NOMBRE DE CHAMBRES',
+  '01/02/2024;HÔTEL DE TOURISME;3 étoiles;HOTEL DU PARC;1 RUE DU PARC;69002;LYON;http://www.hotelduparc.test/;contact@hotelduparc.fr;28',
+  '01/02/2024;HÔTEL DE TOURISME;2 étoiles;IBIS BUDGET LYON EST;5 AVENUE X;69003;LYON;;H1234@accor.com;80',
+  '01/02/2024;CAMPING;3 étoiles;CAMPING DU LAC;ROUTE DU LAC;69002;LYON;;camping@lac.fr;',
+  '01/02/2024;HÔTEL DE TOURISME;3 étoiles;HOTEL SANS CONTACT;2 RUE Y;69002;LYON;;;10',
+  "01/02/2024;HÔTEL DE TOURISME;4 étoiles;L'ESCALE D'ANGLETERRE;3 QUAI Z;74000;ANNECY;;direction@escale.fr;40",
+  '01/02/2024;HÔTEL DE TOURISME;3 étoiles;"HOTEL ""LE QUAI""";8 RUE W;75008;PARIS;;quai@hotel-quai.fr;35',
+].join('\r\n');
+const JEU_DATAGOUV = { title: 'Hébergements collectifs classés en France', organization: { name: 'Atout France' },
+  resources: [{ title: 'Liste des hébergements classés', format: 'csv', url: 'https://static.data.gouv.fr/hebergements.csv', last_modified: '2026-10-01' }] };
+
+function parseCsv(texte, sep) {   // Utilities.parseCsv
+  const lignes = [];
+  let ligne = [], champ = '', guill = false;
+  for (let i = 0; i < texte.length; i++) {
+    const ch = texte[i];
+    if (guill) {
+      if (ch === '"' && texte[i + 1] === '"') { champ += '"'; i++; } else if (ch === '"') guill = false; else champ += ch;
+    } else if (ch === '"') guill = true;
+    else if (ch === sep) { ligne.push(champ); champ = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && texte[i + 1] === '\n') i++;
+      ligne.push(champ); lignes.push(ligne); ligne = []; champ = '';
+    } else champ += ch;
+  }
+  if (champ || ligne.length) { ligne.push(champ); lignes.push(ligne); }
+  return lignes;
+}
+
 function fakeSheet() {
   const rows = [];
   const sh = {
     rows, setName() { return sh; }, setFrozenRows() {}, getMaxRows: () => 1000, appendRow(r) { rows.push(r.slice()); },
-    getLastRow: () => rows.length,
+    getLastRow: () => rows.length, getLastColumn: () => Math.max(0, ...rows.map(r => r.length)),
     getDataRange: () => ({ getValues: () => rows.map(r => r.slice()) }),
     getRange(r, c, n, m) {
       return { setNumberFormat() { return this; }, setValues(v) { v.forEach((row, i) => { rows[r - 1 + i] = row.slice(); }); } };
@@ -16,7 +47,10 @@ function fakeSheet() {
   return sh;
 }
 function context() {
-  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {}, cache = {}, triggers = [], gmail = [];
+  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {}, cache = {}, triggers = [], gmail = [], drive = {};
+  const appels = { fetchAll: 0, urls: [], datagouv: 0, csv: 0, plusGrosMorceau: 0 };
+  const binaire = (code, buf, entetes) => ({ getResponseCode: () => code, getHeaders: () => entetes,
+    getContentText: enc => buf.toString(enc === 'ISO-8859-1' ? 'latin1' : 'utf8') });
   const msg = (to, objet, date) => ({ getTo: () => to, getCc: () => '', getFrom: () => 'Léopold Watchi <leo.watchi@gmail.com>',
     getSubject: () => objet, getDate: () => new Date(date || '2026-10-01T10:00:00Z') });
   const ss = {
@@ -27,20 +61,22 @@ function context() {
   };
   const resp = (code, body) => ({ getResponseCode: () => code, getHeaders: () => ({ 'Content-Type': 'text/html' }), getContentText: () => body });
   const fetchOne = url => {
-    const m = url.match(/^http:\/\/hotelduparc\.test(\/[^?#]*)?/);
+    appels.urls.push(url);
+    const m = url.match(/^http:\/\/(www\.)?hotelduparc\.test(\/[^?#]*)?/);
     if (!m) throw new Error('DNS error ' + url);
-    let p = (m[1] || '/').replace(/^\//, '') || 'index.html';
+    let p = (m[2] || '/').replace(/^\//, '') || 'index.html';
     const f = path.join(SITE, p);
     return fs.existsSync(f) ? resp(200, fs.readFileSync(f, 'utf8')) : resp(404, '');
   };
   const blob = name => ({ n: name, setName(x) { this.n = x; return this; }, getName() { return this.n; }, copyBlob() { return blob(this.n); }, getBytes: () => [1] });
+  const fichierTexte = (id, contenu) => ({ getId: () => id, setContent(c) { contenu = c; }, getBlob: () => ({ getDataAsString: () => contenu }) });
   const ctx = {
-    console, user: 'leo.watchi@gmail.com', sent, triggers, cache, gmail, msg,
-    Utilities: { formatDate: (d, tz, f) => d.toISOString().slice(0, f.indexOf('HH') > 0 ? 19 : 10) },
+    console, user: 'leo.watchi@gmail.com', sent, triggers, cache, gmail, msg, appels, props,
+    Utilities: { formatDate: (d, tz, f) => d.toISOString().slice(0, f.indexOf('HH') > 0 ? 19 : 10), parseCsv },
     SpreadsheetApp: { create: () => ss, openById: () => ss },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
     CacheService: { getScriptCache: () => ({ getAll: ks => { const o = {}; ks.forEach(k => { if (cache[k]) o[k] = cache[k]; }); return o; },
-      putAll: o => Object.assign(cache, o) }) },
+      putAll: o => Object.assign(cache, o), get: k => cache[k] || null, put: (k, v) => { cache[k] = v; } }) },
     ScriptApp: { getProjectTriggers: () => triggers, deleteTrigger: t => triggers.splice(triggers.indexOf(t), 1),
       newTrigger: f => ({ timeBased: () => ({ everyMinutes: () => ({ create: () => triggers.push({ getHandlerFunction: () => f }) }) }) }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
@@ -56,13 +92,34 @@ function context() {
       },
     },
     MimeType: { PDF: 'application/pdf', GOOGLE_DOCS: 'gdoc' },
-    DriveApp: { searchFiles: q => { ctx.requeteDrive = q; const fs = ctx.fichiersDrive.slice(); return { hasNext: () => fs.length > 0, next: () => fs.shift() }; } },
+    DriveApp: {
+      searchFiles: q => { ctx.requeteDrive = q; const fs = ctx.fichiersDrive.slice(); return { hasNext: () => fs.length > 0, next: () => fs.shift() }; },
+      createFile: (nom, contenu) => { const id = 'f' + Object.keys(drive).length; drive[id] = fichierTexte(id, contenu); return drive[id]; },
+      getFileById: id => { if (!drive[id]) throw new Error('introuvable'); return drive[id]; },
+    },
     UrlFetchApp: {
       fetch: (u, o) => {
-        if (/overpass/.test(u)) return resp(200, JSON.stringify(ctx.osm));
+        if (/overpass/.test(u)) return resp(200, JSON.stringify(/Lyon/.test(o.payload.data) ? ctx.osm : { elements: [] }));
+        if (/data\.gouv\.fr\/api\/1\/datasets\/hebergements-collectifs-classes-en-france\//.test(u)) {
+          appels.datagouv++; return resp(200, JSON.stringify(JEU_DATAGOUV));
+        }
+        if (/data\.gouv\.fr/.test(u) && /\.csv/.test(u)) {   // serveur de fichiers : gère les plages d'octets (Range)
+          appels.csv++;
+          const buf = Buffer.from(CSV_ATOUT, 'utf8'), rg = ((o && o.headers) || {}).Range;
+          if (!rg || ctx.sansPlages) return binaire(200, buf, {});
+          const [a, b] = rg.match(/bytes=(\d+)-(\d+)/).slice(1).map(Number);
+          if (a >= buf.length) return binaire(416, Buffer.alloc(0), {});
+          const part = buf.subarray(a, Math.min(b + 1, buf.length));
+          appels.plusGrosMorceau = Math.max(appels.plusGrosMorceau, part.length);
+          return binaire(206, part, { 'Content-Range': 'bytes ' + a + '-' + (a + part.length - 1) + '/' + buf.length });
+        }
+        if (/data\.gouv\.fr/.test(u)) return resp(404, '');
         return fetchOne(u);
       },
-      fetchAll: reqs => reqs.map(r => fetchOne(r.url)),  // une URL inconnue fait échouer tout le lot, comme le vrai
+      fetchAll: reqs => {   // une URL inconnue fait échouer tout le lot, comme le vrai
+        if (reqs.every(r => /data\.gouv/.test(r.url))) return reqs.map(r => ctx.UrlFetchApp.fetch(r.url, r));
+        appels.fetchAll++; return reqs.map(r => fetchOne(r.url));
+      },
     },
   };
   const fichier = (nom, mime, date) => ({ getMimeType: () => mime, getLastUpdated: () => new Date(date), getUrl: () => 'drive/' + date,
@@ -70,6 +127,7 @@ function context() {
   ctx.fichiersDrive = [fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-09-01'),
     fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-10-20'),
     fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-10-02')];
+  ctx.osm = { elements: [] };
   vm.createContext(ctx);
   ctx.eval = code => vm.runInContext(code, ctx);
   for (const f of ['Code.gs', 'Lettre.gs']) vm.runInContext(fs.readFileSync(path.join(DIR, f), 'utf8'), ctx, { filename: f });
@@ -119,7 +177,7 @@ test('type d\'hôtel', () => {
   cas.forEach(([h, t]) => assert.strictEqual(g.segment_(h), t, h.nom));
 });
 
-test('lettre : 4 types, pas de variable oubliée', () => {
+test('lettre : 6 types, pas de variable oubliée', () => {
   const g = context();
   assert.strictEqual(g.deHotel_('Hôtel du Parc'), "de l'Hôtel du Parc");
   assert.strictEqual(g.deHotel_('Le Grand Hôtel'), 'du Grand Hôtel');
@@ -144,7 +202,90 @@ test('lettre : 4 types, pas de variable oubliée', () => {
   assert.strictEqual(g.nomFichierCv_('Hôtel / Le Parc', C, '.pdf'), 'CV Léopold Watchi Hôtel Le Parc.pdf');
 });
 
-test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauvais compte', () => {
+test('zones de recherche et noms', () => {
+  const g = context();
+  const z = s => g.analyserZone_(s);
+  assert.ok(g.dansZone_(z('Lyon'), '69002', 'LYON'));
+  assert.ok(g.dansZone_(z('lyon'), '69002', 'Lyon 2e Arrondissement'));
+  assert.ok(g.dansZone_(z('Saint-Étienne'), '42000', 'ST ETIENNE'));
+  assert.ok(!g.dansZone_(z('Lyon'), '69100', 'VILLEURBANNE'));
+  assert.ok(g.dansZone_(z('Paris 8e'), '75008', 'PARIS'));
+  assert.ok(g.dansZone_(z('Paris 16e arrondissement'), '75116', 'PARIS'));
+  assert.ok(!g.dansZone_(z('Paris 8e'), '75018', 'PARIS'));
+  assert.ok(g.dansZone_(z('Lyon 3'), '69003', 'LYON'));
+  assert.ok(g.dansZone_(z('74'), '74000', 'ANNECY') && !g.dansZone_(z('74'), '07400', 'X'));
+  assert.ok(g.dansZone_(z('2A'), '20000', 'AJACCIO'));
+  assert.ok(g.dansZone_(z('69003'), '69003', 'LYON'));
+  assert.strictEqual(g.joliNom_('HOTEL DU PARC'), 'Hôtel du Parc');
+  assert.strictEqual(g.joliNom_("L'ESCALE D'ANGLETERRE"), "L'Escale d'Angleterre");
+  assert.strictEqual(g.joliNom_('IBIS BUDGET LYON EST'), 'ibis budget Lyon Est');
+  assert.strictEqual(g.joliNom_('SAINT-JEAN-DE-LUZ'), 'Saint-Jean-de-Luz'.replace('-de-', '-De-'));
+  assert.strictEqual(g.joliNom_('Le Petit Nice'), 'Le Petit Nice');   // déjà bien écrit : inchangé
+});
+
+test('scan : liste officielle + OpenStreetMap, sans doublon, adresses prêtes tout de suite', () => {
+  const g = context();
+  g.osm = { elements: [
+    { type: 'node', id: 1, tags: { name: 'Hôtel du Parc', website: 'http://hotelduparc.test/', tourism: 'hotel' } },
+    { type: 'node', id: 9, tags: { name: 'Hôtel Récent', website: 'http://site-mort.test/', tourism: 'hotel' } },
+  ] };
+  g.eval('ATOUT.morceau = 97');   // morceaux minuscules : lignes et accents coupés entre deux morceaux
+  const r = g.scanVille('Lyon', 400);
+  same([r.atout, r.osm, r.nouveaux, r.sansContact, r.prets], [3, 2, 3, 1, 2]);
+  assert.strictEqual(g.appels.datagouv, 1);
+  assert.ok(g.appels.plusGrosMorceau <= 97, 'jamais plus d\'un morceau à la fois');
+  const hs = g.listeHotels('Lyon');
+  same(hs.map(h => h.nom).sort(), ['Hôtel Récent', 'Hôtel du Parc', 'ibis budget Lyon Est']);
+  const ibis = hs.find(h => /ibis/.test(h.nom));
+  // pas de site à visiter : prêt tout de suite, avec les infos officielles
+  same([ibis.statut, ibis.analyse, ibis.email_choisi, ibis.etoiles, ibis.chambres, ibis.segment, ibis.marque],
+    ['nouveau', 'faite', 'h1234@accor.com', 2, 80, 'economique', 'ibis budget']);
+  const parc = hs.find(h => h.nom === 'Hôtel du Parc');
+  same([parc.statut, parc.analyse, parc.email_choisi], ['nouveau', 'a_faire', 'contact@hotelduparc.fr']);
+  assert.strictEqual(g.etat().aAnalyser, 2);
+
+  // l'adresse du fichier est gardée en cache : data.gouv.fr n'est interrogé qu'une fois
+  g.scanVille('Paris 8e', 400);
+  assert.strictEqual(g.appels.datagouv, 1);
+  const quai = g.listeHotels('Paris 8e')[0];
+  same([quai.nom, quai.ville, quai.email_choisi], ['Hôtel "Le Quai"', 'Paris', 'quai@hotel-quai.fr']);
+  const dept = g.scanVille('74', 400);
+  assert.strictEqual(dept.nouveaux, 1);
+  same(g.listeHotels('74').map(h => [h.nom, h.ville, h.segment]), [["L'Escale d'Angleterre", 'Annecy', 'intermediaire']]);
+
+  // plusieurs zones : une seule lecture du fichier ; serveur qui ignore les plages : tout lu d'un coup
+  const g2 = context();
+  g2.sansPlages = true;
+  const z = g2.hotelsAtoutZones_(['Lyon', '74', 'Paris 8e', 'Marseille']);
+  same(z.map(l => l.length), [3, 1, 1, 0]);
+  assert.strictEqual(g2.appels.csv, 1);
+  same(z[0].map(h => h.nom), ['Hôtel du Parc', 'ibis budget Lyon Est', 'Hôtel Sans Contact']);
+  const v = g2.verifierAtout_();
+  assert.ok(/nom=NOM COMMERCIAL/.test(v.colonnes) && /email=COURRIEL/.test(v.colonnes), v.colonnes);
+});
+
+test('analyse rapide : une seule vague de requêtes quand le site donne une bonne adresse', () => {
+  const g = context();
+  const h = { nom: 'Hôtel du Parc', site: 'http://hotelduparc.test/', emails: [] };
+  g.crawlLot_([h]);
+  assert.strictEqual(g.appels.fetchAll, 2);   // accueil + 3 pages devinées, puis 2 pages trouvées dans les liens
+  assert.ok(g.appels.urls.length <= 6, g.appels.urls.join(' '));
+  assert.ok(g.appels.urls.includes('http://hotelduparc.test/recrutement'));
+
+  // un site qui affiche une adresse recrutement dès l'accueil : pas de 2e vague
+  const g2 = context();
+  fs.writeFileSync(path.join(SITE, 'recrutement'), '<p>Envoyez votre CV à jobs@hotelduparc.fr</p>');
+  try {
+    const h2 = { nom: 'Hôtel du Parc', site: 'http://hotelduparc.test/', emails: [] };
+    g2.crawlLot_([h2]);
+    assert.strictEqual(g2.appels.fetchAll, 1);
+    assert.strictEqual(h2.emails[0].email, 'jobs@hotelduparc.fr');
+  } finally {
+    fs.unlinkSync(path.join(SITE, 'recrutement'));
+  }
+});
+
+test('parcours complet : scan, analyse, envoi, doublon refusé, mauvais compte', () => {
   const g = context();
   g.osm = { elements: [
     { type: 'node', id: 1, tags: { name: 'Hôtel du Parc', website: 'http://hotelduparc.test/', tourism: 'hotel' } },
@@ -152,29 +293,29 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
     { type: 'node', id: 3, tags: { name: 'Sans contact', tourism: 'hotel' } },
     { type: 'way', id: 4, tags: { name: 'Hôtel Bis', email: 'marie.dupont@hotelduparc.fr', tourism: 'hotel' } },
   ] };
-  const r = g.scanVille('Lyon', 100);
-  same([r.total, r.nouveaux, r.dejaConnus], [3, 3, 0]);
+  const r = g.scanVille('Lyon', 400);
+  same([r.nouveaux, r.dejaConnus], [4, 0]);              // Parc (2 sources, 1 seul hôtel), ibis, Fantôme, Bis
   assert.strictEqual(g.triggers.length, 1);              // analyse en arrière-plan programmée
-  assert.strictEqual(g.analyserProchains(2), 2);
-  assert.strictEqual(g.analyserProchains(2), 1);          // les 2 premiers sont déjà réservés / faits
-  assert.strictEqual(g.analyserProchains(2), 0);
+  assert.strictEqual(g.analyserProchains(1), 1);
+  assert.strictEqual(g.analyserProchains(5), 1);          // le premier est déjà réservé / fait
+  assert.strictEqual(g.analyserProchains(5), 0);
   g.traiterFileAttente();
   assert.strictEqual(g.triggers.length, 0);              // plus rien à faire : le déclencheur s'arrête
   const hs = g.listeHotels('Lyon');
   const parc = hs.find(h => h.nom === 'Hôtel du Parc');
-  // "Directeur de la publication : Marie Dupont, marie.dupont@..." passe devant direction@
+  // la visite du site trouve mieux que l'adresse officielle : "Directeur de la publication : Marie Dupont"
   assert.strictEqual(parc.email_choisi, 'marie.dupont@hotelduparc.fr');
   assert.ok(parc.emails[0].raisons.includes('indiquée comme adresse de la direction'));
-  same([parc.chambres, parc.etoiles, parc.segment], [28, 3, 'independant']);
+  same([parc.chambres, parc.etoiles, parc.segment, parc.analyse], [28, 3, 'independant', 'faite']);
   const found = parc.emails.map(c => c.email);
-  assert.ok(found.includes('contact@hotelduparc.fr') && found.includes('marie.dupont@hotelduparc.fr'));
+  assert.ok(found.includes('contact@hotelduparc.fr') && found.includes('direction@hotelduparc.fr'));
   assert.ok(!found.includes('support@ovh.net'));
   assert.strictEqual(found[found.length - 1], 'reservation@hotelduparc.fr');
   assert.strictEqual(hs.find(h => h.nom === 'Hôtel Fantôme').emails.length, 0);
 
-  // un 2e scan ne crée pas de doublon
-  same((({ nouveaux, dejaConnus }) => [nouveaux, dejaConnus])(g.scanVille('Lyon, Annecy', 100)), [0, 3]);
-  assert.strictEqual(g.listeHotels().length, 3);
+  // un 2e scan ne repropose rien de connu
+  same((({ nouveaux, dejaConnus }) => [nouveaux, dejaConnus])(g.scanVille('Lyon, Annecy', 400)), [1, 4]);
+  assert.strictEqual(g.listeHotels().length, 5);
 
   // le CV est le plus récent des CV_Leopold_Watchi.pdf du Drive
   assert.strictEqual(g.etat().cv.url, 'drive/2026-10-20');
@@ -217,6 +358,6 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
 
 let ko = 0;
 for (const [n, f] of tests) {
-  try { f(); console.log('ok  ', n); } catch (e) { ko++; console.log('FAIL', n, '\n', e.message); }
+  try { f(); console.log('ok  ', n); } catch (e) { ko++; console.log('FAIL', n, '\n', e.stack.split('\n').slice(0, 4).join('\n')); }
 }
 process.exit(ko ? 1 : 0);
