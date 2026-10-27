@@ -49,8 +49,8 @@
 <div id="alerte" class="alerte" hidden></div>
 <header>
   <h1>Candidatures hôtels</h1>
-  <span id="mode" class="badge"></span>
-  <button id="btnMode" class="small"></button>
+  <span class="badge live">Envoi direct aux hôtels</span>
+  <span class="stat" id="cv"></span>
   <span class="stat" id="quota"></span>
   <span class="stat" id="compte"></span>
   <span class="stat" id="envoi"></span>
@@ -135,11 +135,10 @@ function dialog(texte, saisie) {
 
 async function refreshState() {
   state = await run("etat");
-  $("#mode").textContent = state.modeTest ? "MODE TEST (envoi vers vous)" : "ENVOI RÉEL";
-  $("#mode").className = "badge " + (state.modeTest ? "test" : "live");
-  $("#btnMode").textContent = state.modeTest ? "Passer en envoi réel" : "Repasser en mode test";
+  $("#cv").innerHTML = state.cv.ok ? `<a href="${esc(state.cv.url)}" target="_blank">CV du ${esc(state.cv.date)}</a>`
+                                   : `<span class="warn">${esc(state.cv.erreur)}</span>`;
   $("#quota").textContent = `Envoyés aujourd'hui : ${state.envoyesAujourdhui} / ${state.limite}`;
-  $("#compte").innerHTML = `Depuis ${esc(state.compte)} · <a href="${esc(state.sheetUrl)}" target="_blank">suivi (Sheet)</a>`;
+  $("#compte").innerHTML = `Depuis ${esc(state.compte)} · <a href="${esc(state.sheetUrl)}" target="_blank">suivi (Sheet)</a> · v${esc(state.version)}`;
   $("#alerte").hidden = state.bonCompte;
   $("#alerte").textContent = `Ce script tourne sur ${state.compte} : les envois sont bloqués. Installez-le sur le compte prévu dans les réglages.`;
 }
@@ -298,13 +297,6 @@ async function analyser() {
   await loadRecherches($("#recherche").value); await loadHotels(); autoSelect(false);
 }
 
-$("#btnMode").onclick = async () => {
-  const versTest = !state.modeTest;
-  if (!versTest && !(await dialog("Passer en ENVOI RÉEL ? Les candidatures partiront vraiment aux hôtels."))) return;
-  await run("choisirModeTest", versTest);
-  await refreshState();
-};
-
 $("#recherche").onchange = loadHotels;
 $("#masquer").onchange = render;
 $("#btnAuto").onclick = () => autoSelect(true);
@@ -316,11 +308,9 @@ $("#btnSend").onclick = async () => {
   const vus = new Set(), ids = [];
   for (const h of hotels) if (selected.has(h.id) && !vus.has(h.email_choisi)) { vus.add(h.email_choisi); ids.push(h.id); }
   const reste = state.limite - state.envoyesAujourdhui;
-  if (!state.modeTest && ids.length > reste) ids.length = Math.max(reste, 0);
+  if (ids.length > reste) ids.length = Math.max(reste, 0);
   if (!ids.length) return dialog("Limite du jour atteinte.");
-  const ok = await dialog(state.modeTest
-    ? `MODE TEST : ${ids.length} mail(s) vont vous être envoyés à vous-même. Continuer ?`
-    : `Envoyer ${ids.length} candidature(s) pour de vrai ? Gardez cet onglet ouvert pendant l'envoi.`);
+  const ok = await dialog(`Envoyer ${ids.length} candidature(s) aux hôtels ? Gardez cet onglet ouvert pendant l'envoi.`);
   if (!ok) return;
   sending = true; stop = false; $("#btnStop").hidden = false; $("#btnStop").disabled = false; render();
   let n = 0; const erreurs = [];
@@ -331,7 +321,7 @@ $("#btnSend").onclick = async () => {
     try {
       await run("envoyer", id); n++;
       selected.delete(id);
-      if (!state.modeTest) { h.statut = "envoye"; h.deja_envoye = true; }
+      h.statut = "envoye"; h.deja_envoye = true;
       render();
     } catch (err) { erreurs.push(err.message); $("#log").textContent = erreurs.slice(-2).join(" · "); }
     if (id !== ids[ids.length - 1] && !stop) {

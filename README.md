@@ -16,6 +16,8 @@ utiliser une fenêtre de navigation privée). Le script vérifie le compte et re
 
 1. **Le CV** : dans Word, *Fichier → Enregistrer sous → PDF*, nommé `CV_Leopold_Watchi.pdf`,
    puis le déposer dans [Google Drive](https://drive.google.com) (glisser-déposer).
+   S'il y a plusieurs `CV_Leopold_Watchi.pdf` dans le Drive, c'est **le plus récent** qui est joint :
+   pour mettre le CV à jour, il suffit d'en déposer un nouveau. La date du CV utilisé est affichée en haut de la page.
 2. **Le script** : aller sur [script.google.com](https://script.google.com) → *Nouveau projet*,
    le renommer « Candidatures hôtels ». Puis copier-coller les 3 fichiers du dossier `apps-script/` :
    - `Code.gs` : remplacer tout le contenu du fichier `Code.gs` déjà présent ;
@@ -32,12 +34,13 @@ utiliser une fenêtre de navigation privée). Le script vérifie le compte et re
    (elle finit par `/dev`) et l'ajouter aux favoris. Cette URL n'est accessible qu'à vous
    et utilise toujours la dernière version enregistrée du code.
 
-L'outil est en **envoi réel**. Le bouton en haut de la page permet de passer en **mode test** (tous les mails
-partent vers vous-même, avec l'adresse de l'hôtel dans l'objet, rien n'est compté comme envoyé) et d'en revenir,
-sans toucher au code.
+Les candidatures partent **directement à l'adresse de chaque hôtel** (il n'y a plus de mode test).
+Seul `installer` s'envoie un mail de contrôle à vous-même.
 
 **Mise à jour du code** : recoller les fichiers, enregistrer, relancer `installer`, puis si vous utilisez l'URL
 `/exec` : *Déployer → Gérer les déploiements → ✏️ → Version : Nouvelle version → Déployer*.
+Le numéro de version est affiché en haut de la page (`v4 - envoi direct aux hôtels`) : s'il ne correspond pas,
+la page tourne encore sur l'ancien code.
 
 ## Utilisation (≈ 10 minutes pour 50 mails)
 
@@ -84,7 +87,7 @@ Elle est proposée avec la mention « déduite, non vérifiée ».
 Chaque adresse utilisée est inscrite dans l'onglet **Envois** du Google Sheet de suivi. Une adresse déjà utilisée
 est refusée, même si elle réapparaît pour un autre hôtel (fréquent pour les chaînes) ou deux fois dans la même
 sélection. Limite : `limiteParJour` = 100, le maximum autorisé par Gmail depuis un script
-(les mails de test et de contrôle comptent aussi dans ce quota Gmail).
+(le mail de contrôle compte aussi dans ce quota Gmail).
 
 ## La lettre
 

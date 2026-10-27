@@ -46,7 +46,7 @@ function context() {
     MailApp: { getRemainingDailyQuota: () => 100 },
     GmailApp: { sendEmail: (to, objet, corps, o) => sent.push({ to, objet, corps, pj: o.attachments[0].getName(), from: o.name }) },
     MimeType: { PDF: 'application/pdf', GOOGLE_DOCS: 'gdoc' },
-    DriveApp: { searchFiles: () => { let d = false; return { hasNext: () => !d, next: () => { d = true; return { getMimeType: () => 'application/pdf', getBlob: () => blob('CV_Leopold_Watchi.pdf') }; } }; } },
+    DriveApp: { searchFiles: q => { ctx.requeteDrive = q; const fs = ctx.fichiersDrive.slice(); return { hasNext: () => fs.length > 0, next: () => fs.shift() }; } },
     UrlFetchApp: {
       fetch: (u, o) => {
         if (/overpass/.test(u)) return resp(200, JSON.stringify(ctx.osm));
@@ -55,6 +55,11 @@ function context() {
       fetchAll: reqs => reqs.map(r => fetchOne(r.url)),  // une URL inconnue fait échouer tout le lot, comme le vrai
     },
   };
+  const fichier = (nom, mime, date) => ({ getMimeType: () => mime, getLastUpdated: () => new Date(date), getUrl: () => 'drive/' + date,
+    getBlob: () => blob(nom) });
+  ctx.fichiersDrive = [fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-09-01'),
+    fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-10-20'),
+    fichier('CV_Leopold_Watchi.pdf', 'application/pdf', '2026-10-02')];
   vm.createContext(ctx);
   ctx.eval = code => vm.runInContext(code, ctx);
   for (const f of ['Code.gs', 'Lettre.gs']) vm.runInContext(fs.readFileSync(path.join(DIR, f), 'utf8'), ctx, { filename: f });
@@ -122,7 +127,6 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
     { type: 'node', id: 3, tags: { name: 'Sans contact', tourism: 'hotel' } },
     { type: 'way', id: 4, tags: { name: 'Hôtel Bis', email: 'marie.dupont@hotelduparc.fr', tourism: 'hotel' } },
   ] };
-  g.eval("PropertiesService.getScriptProperties().setProperty('MODE_TEST', 'oui')");
   const r = g.scanVille('Lyon', 100);
   same([r.total, r.nouveaux], [3, 3]);
   assert.strictEqual(g.triggers.length, 1);              // analyse en arrière-plan programmée
@@ -147,23 +151,22 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
   assert.strictEqual(g.scanVille('Lyon, Annecy', 100).nouveaux, 0);
   assert.strictEqual(g.listeHotels().length, 3);
 
-  g.envoyer(parc.id);
-  assert.strictEqual(g.sent[0].to, 'leo.watchi@gmail.com');
-  assert.ok(g.sent[0].objet.startsWith('[TEST -> marie.dupont@hotelduparc.fr]'));
-  assert.strictEqual(g.sent[0].pj, 'CV Léopold Watchi Hôtel du Parc.pdf');
-  assert.strictEqual(g.etat().envoyesAujourdhui, 0);
+  // le CV est le plus récent des CV_Leopold_Watchi.pdf du Drive
+  assert.strictEqual(g.etat().cv.url, 'drive/2026-10-20');
+  assert.ok(g.requeteDrive.startsWith('title = "CV_Leopold_Watchi.pdf"'));
 
-  assert.strictEqual(g.choisirModeTest(false), false);
   g.envoyer(parc.id);
-  assert.strictEqual(g.sent[1].to, 'marie.dupont@hotelduparc.fr');
-  assert.strictEqual(g.sent[1].from, 'Léopold Watchi');
+  assert.strictEqual(g.sent[0].to, 'marie.dupont@hotelduparc.fr');      // directement à l'hôtel
+  assert.strictEqual(g.sent[0].objet, 'Candidature spontanée - Adjoint à la direction - Hôtel du Parc');
+  assert.strictEqual(g.sent[0].pj, 'CV Léopold Watchi Hôtel du Parc.pdf');
+  assert.strictEqual(g.sent[0].from, 'Léopold Watchi');
   assert.strictEqual(g.etat().envoyesAujourdhui, 1);
   assert.throws(() => g.envoyer(parc.id), /déjà envoyé/);
   const bis = g.listeHotels().find(h => h.nom === 'Hôtel Bis');
   assert.strictEqual(bis.email_choisi, 'marie.dupont@hotelduparc.fr');
   assert.ok(bis.deja_envoye);
   assert.throws(() => g.envoyer(bis.id), /déjà reçu une candidature/);
-  assert.strictEqual(g.sent.length, 2);
+  assert.strictEqual(g.sent.length, 1);
 
   g.user = 'autre@entreprise.fr';
   assert.throws(() => g.envoyer(bis.id), /installez-le sur leo.watchi@gmail.com/);

@@ -11,10 +11,7 @@ const CONFIG = {
   telephone: '07 81 44 34 13',
   email: 'leo.watchi@gmail.com',      // compte d'envoi : le script refuse d'envoyer depuis un autre compte
 
-  cvNom: 'CV_Leopold_Watchi',          // nom du CV dans Google Drive (PDF ou Google Doc, sans l'extension)
-
-  // Le mode test (tout part vers adresseTest) se change directement dans la page, bouton en haut.
-  adresseTest: 'leo.watchi@gmail.com',
+  cvNom: 'CV_Leopold_Watchi.pdf',      // nom du CV dans Google Drive : le plus récent est utilisé
 
   limiteParJour: 100,                  // Gmail autorise 100 destinataires par jour depuis un script
   delaiEntreEnvoisSec: [3, 6],         // pause aléatoire entre deux mails (100 mails ≈ 10 min)
@@ -33,7 +30,8 @@ function doGet() {
 function etat() {
   const compte = Session.getEffectiveUser().getEmail();
   return {
-    modeTest: modeTest_(),
+    version: VERSION,
+    cv: infoCv_(),
     aAnalyser: lireHotels_().filter(h => h.statut === 'a_analyser').length,
     compte: compte,
     bonCompte: compte.toLowerCase() === CONFIG.email.toLowerCase(),
@@ -46,13 +44,8 @@ function etat() {
   };
 }
 
-function modeTest_() { return PropertiesService.getScriptProperties().getProperty('MODE_TEST') === 'oui'; }
-
-/** Bouton "mode test / envoi réel" de la page. */
-function choisirModeTest(test) {
-  PropertiesService.getScriptProperties().setProperty('MODE_TEST', test ? 'oui' : 'non');
-  return modeTest_();
-}
+// Affichée en haut de la page : si elle ne correspond pas, la page utilise une ancienne version du code
+const VERSION = '4 - envoi direct aux hôtels';
 
 // ============================================================ STOCKAGE (Google Sheet)
 
@@ -289,8 +282,7 @@ function envoyer(id) {
       h.statut = 'ignore'; ecrireHotels_([h]);
       throw new Error(to + ' a déjà reçu une candidature : envoi annulé');
     }
-    const test = modeTest_();
-    if (!test && envoisDuJour_() >= CONFIG.limiteParJour) throw new Error('Limite quotidienne atteinte');
+    if (envoisDuJour_() >= CONFIG.limiteParJour) throw new Error('Limite quotidienne atteinte');
     if (MailApp.getRemainingDailyQuota() < 1) throw new Error('Quota Gmail du jour épuisé');
 
     const l = construireLettre_(h, CONFIG);
@@ -298,11 +290,6 @@ function envoyer(id) {
     const corps = h.corps_perso || l.corps;
     const cv = cvBlob_().setName(nomFichierCv_(h.nom, CONFIG, '.pdf'));
     const options = { attachments: [cv], name: CONFIG.prenom + ' ' + CONFIG.nom, replyTo: CONFIG.email };
-
-    if (test) {
-      GmailApp.sendEmail(CONFIG.adresseTest, '[TEST -> ' + to + '] ' + objet, corps, options);
-      return { test: true, hotel: h.nom };
-    }
     GmailApp.sendEmail(to, objet, corps, options);
     const env = feuille_('Envois');
     env.getRange(env.getLastRow() + 1, 1, 1, COLS_ENVOIS.length).setNumberFormat('@')
@@ -310,7 +297,7 @@ function envoyer(id) {
     h.statut = 'envoye';
     ecrireHotels_([h]);
     if (CONFIG.copieCvDrive) dossierCopies_().createFile(cv);
-    return { test: false, hotel: h.nom };
+    return { hotel: h.nom, email: to };
   } finally {
     lock.releaseLock();
   }
@@ -324,20 +311,31 @@ function hotel_(id) {
   return h;
 }
 
+/** Le fichier CV_Leopold_Watchi.pdf le plus récent du Drive (s'il y en a plusieurs du même nom). */
+function fichierCv_() {
+  const it = DriveApp.searchFiles('title = "' + CONFIG.cvNom.replace(/"/g, '') + '" and trashed = false');
+  let cv = null;
+  while (it.hasNext()) {
+    const f = it.next();
+    if (f.getMimeType() !== MimeType.PDF) continue;
+    if (!cv || f.getLastUpdated() > cv.getLastUpdated()) cv = f;
+  }
+  if (!cv) throw new Error('CV introuvable : déposez ' + CONFIG.cvNom + ' (en PDF) dans votre Google Drive');
+  return cv;
+}
+
+function infoCv_() {
+  try {
+    const f = fichierCv_();
+    return { ok: true, date: Utilities.formatDate(f.getLastUpdated(), 'Europe/Paris', "dd/MM/yyyy 'à' HH:mm"), url: f.getUrl() };
+  } catch (e) {
+    return { ok: false, erreur: e.message };
+  }
+}
+
 let cvCache_ = null;
 function cvBlob_() {
-  if (!cvCache_) {
-    const it = DriveApp.searchFiles('title contains "' + CONFIG.cvNom.replace(/"/g, '') + '" and trashed = false');
-    let doc = null, pdf = null;
-    while (it.hasNext()) {
-      const f = it.next();
-      if (f.getMimeType() === MimeType.PDF && !pdf) pdf = f;
-      if (f.getMimeType() === MimeType.GOOGLE_DOCS && !doc) doc = f;
-    }
-    if (pdf) cvCache_ = pdf.getBlob();
-    else if (doc) cvCache_ = doc.getAs(MimeType.PDF);
-    else throw new Error('CV introuvable dans Google Drive (nom attendu : ' + CONFIG.cvNom + ', en PDF ou Google Doc)');
-  }
+  if (!cvCache_) cvCache_ = fichierCv_().getBlob();
   return cvCache_.copyBlob();
 }
 
@@ -354,14 +352,14 @@ function installer() {
   ScriptApp.getProjectTriggers();   // autorisation pour l'analyse en arrière-plan
   const compte = Session.getEffectiveUser().getEmail();
   Logger.log('Suivi : ' + ss.getUrl());
-  Logger.log('CV trouvé (' + Math.round(cv.getBytes().length / 1024) + ' Ko)');
+  Logger.log('CV utilisé : ' + CONFIG.cvNom + ' du ' + infoCv_().date + ' (' + Math.round(cv.getBytes().length / 1024) + ' Ko)');
   Logger.log('Compte : ' + compte + (compte.toLowerCase() === CONFIG.email.toLowerCase() ? ' ✔' : ' ✘ ce n\'est pas ' + CONFIG.email));
   const l = construireLettre_({ nom: 'Hôtel Exemple', ville: 'Lyon', segment: 'independant' }, CONFIG);
   GmailApp.sendEmail(compte, '[Contrôle] ' + l.objet, l.corps,
     { attachments: [cv], name: CONFIG.prenom + ' ' + CONFIG.nom, replyTo: CONFIG.email });
-  Logger.log('Mail de contrôle envoyé à ' + compte + ' : vérifiez votre boîte de réception.');
+  Logger.log('Mail de contrôle envoyé à vous-même (' + compte + ') : vérifiez votre boîte de réception.');
+  Logger.log('Depuis la page, les candidatures partent directement à l\'adresse de chaque hôtel.');
   Logger.log('Quota Gmail restant aujourd\'hui : ' + MailApp.getRemainingDailyQuota());
-  Logger.log('Mode : ' + (modeTest_() ? 'TEST' : 'ENVOI RÉEL'));
 }
 
 // ============================================================ OPENSTREETMAP
