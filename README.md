@@ -39,7 +39,7 @@ Seul `installer` s'envoie un mail de contrôle à vous-même.
 
 **Mise à jour du code** : recoller les fichiers, enregistrer, relancer `installer`, puis si vous utilisez l'URL
 `/exec` : *Déployer → Gérer les déploiements → ✏️ → Version : Nouvelle version → Déployer*.
-Le numéro de version est affiché en haut de la page (`v4 - envoi direct aux hôtels`) : s'il ne correspond pas,
+Le numéro de version est affiché en haut de la page (`v5 - lettre ciblée, anti-doublon Gmail`) : s'il ne correspond pas,
 la page tourne encore sur l'ancien code.
 
 ## Utilisation (≈ 10 minutes pour 50 mails)
@@ -82,24 +82,38 @@ recrutement, puis celle de la direction.
 Hôtels Accor : l'adresse du directeur suit la convention `H1234-GM@accor.com` (code de l'hôtel dans l'URL).
 Elle est proposée avec la mention « déduite, non vérifiée ».
 
-## Anti-doublon
+## Anti-doublon et suivi des envois
 
-Chaque adresse utilisée est inscrite dans l'onglet **Envois** du Google Sheet de suivi. Une adresse déjà utilisée
-est refusée, même si elle réapparaît pour un autre hôtel (fréquent pour les chaînes) ou deux fois dans la même
-sélection. Limite : `limiteParJour` = 100, le maximum autorisé par Gmail depuis un script
-(le mail de contrôle compte aussi dans ce quota Gmail).
+- Chaque candidature envoyée est inscrite dans l'onglet **Envois** du Google Sheet de suivi
+  (adresse, hôtel, objet, date et heure). Le bouton **Historique** de la page affiche la même liste.
+- **Envoi bloqué** si l'adresse est déjà dans l'onglet Envois, ou si Gmail contient déjà un message envoyé
+  à cette adresse (par exemple envoyé à la main) : l'adresse est alors ajoutée au suivi.
+- **Le scan ne propose que des contacts nouveaux** : un hôtel déjà dans le suivi n'est jamais reproposé,
+  et pour chaque hôtel l'outil choisit la meilleure adresse **jamais contactée**. Si toutes ses adresses ont déjà
+  reçu une candidature (fréquent pour les chaînes qui partagent une adresse), l'hôtel passe en « Déjà contacté »
+  et disparaît de la liste.
+- `installer` et le bouton *Récupérer depuis Gmail* (dans Historique) ajoutent au suivi les mails
+  « Candidature spontanée » trouvés dans « Messages envoyés ».
+- Limite : `limiteParJour` = 100, le maximum autorisé par Gmail depuis un script.
 
 ## La lettre
 
 Le texte est dans `Lettre.gs`, entre les deux accents graves `` ` ``, modifiable directement dans l'éditeur.
-Un paragraphe change selon le type d'hôtel, détecté automatiquement et modifiable dans le tableau :
+Elle met en avant la polyvalence, la curiosité, le pilotage de projets et le travail avec les équipes terrain,
+sans parler d'expérience en hôtellerie. Un paragraphe change selon le **type d'hôtel**, détecté automatiquement
+(enseigne, étoiles, nombre de chambres) et modifiable dans le tableau. À vérifier d'un coup d'œil avant d'envoyer :
 
-- **Indépendant** (petit hôtel) : polyvalence, aider la direction au quotidien
-- **Intermédiaire** (> 45 chambres ou 4★) : coordination des services, suivi de l'activité et des coûts
-- **Groupe / chaîne** (ibis, Mercure, Best Western…) : lien entre l'établissement et les standards d'un groupe
-- **Luxe** (5★) : exigence, détail, langues
+| Type | Exemples | Ce que dit la lettre |
+|---|---|---|
+| Indépendant | petit hôtel, hôtel de charme | polyvalence, soulager la direction au quotidien |
+| Indépendant moyen / 4★ | > 45 chambres ou 4★ sans enseigne | coordination réception / étages / maintenance, suivi de l'activité |
+| Chaîne | Mercure, Novotel, Best Western, Hilton… | lien entre l'établissement et les standards du groupe |
+| Économique | ibis, B&B, Campanile, Première Classe… | équipes resserrées, coûts, efficacité |
+| Résidence / appart'hôtel | Adagio, Citadines, Appart'City… | séjours longs, gestion des appartements et des équipements |
+| Luxe 5★ | 5 étoiles, Sofitel, Barrière… | exigence, détail, langues |
 
-Chaque section a plusieurs variantes : les mails du jour ne sont pas identiques mot pour mot,
+Quand la marque, le nombre de chambres ou les étoiles sont connus, la lettre les cite (« un hôtel Mercure »,
+« avec 64 chambres »). Chaque section a plusieurs variantes : les mails du jour ne sont pas identiques mot pour mot,
 mais un hôtel donné reçoit toujours la version affichée dans l'aperçu.
 
 Le CV joint s'appelle `CV Léopold Watchi <Nom de l'hôtel>.pdf`.

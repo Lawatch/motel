@@ -45,7 +45,7 @@ function etat() {
 }
 
 // Affichée en haut de la page : si elle ne correspond pas, la page utilise une ancienne version du code
-const VERSION = '4 - envoi direct aux hôtels';
+const VERSION = '5 - lettre ciblée, anti-doublon Gmail';
 
 // ============================================================ STOCKAGE (Google Sheet)
 
@@ -125,18 +125,22 @@ function scanVille(villes, limite) {
   const parVille = liste.map(v => ({ ville: v, hotels: hotelsOsm_(v).slice(0, limite || 150) }));
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  let total = 0, nouveauxTotal = 0;
+  let total = 0, nouveauxTotal = 0, dejaConnus = 0;
   try {
     const existants = lireHotels_();
     const parCle = {};
     existants.forEach(h => { parCle[h.cle] = h; });
     let maxId = existants.reduce((m, h) => Math.max(m, Number(h.id) || 0), 0);
     const nouveaux = [], maj = [];
+    const vus = {};
     parVille.forEach(pv => pv.hotels.forEach(t => {
+      if (vus[t.cle]) return;   // même hôtel trouvé pour deux villes voisines
+      vus[t.cle] = true;
       total++;
       const h = parCle[t.cle];
-      if (h) {
-        if (h.recherche !== pv.ville) { h.recherche = pv.ville; maj.push(h); }
+      if (h) {   // déjà dans le suivi (contacté, ignoré ou en attente) : jamais reproposé comme nouveau
+        dejaConnus++;
+        if (h.recherche !== pv.ville && h.statut !== 'envoye') { h.recherche = pv.ville; maj.push(h); }
         return;
       }
       t.id = ++maxId; t.statut = 'a_analyser'; t.recherche = pv.ville;
@@ -154,7 +158,7 @@ function scanVille(villes, limite) {
     lock.releaseLock();
   }
   if (nouveauxTotal) assurerDeclencheur_();
-  return { recherches: liste, total: total, nouveaux: nouveauxTotal };
+  return { recherches: liste, total: total, nouveaux: nouveauxTotal, dejaConnus: dejaConnus };
 }
 
 /** 2. Analyse les prochains hôtels en attente. Plusieurs appels peuvent tourner en même temps :
@@ -178,7 +182,7 @@ function analyserProchains(n) {
   crawlLot_(lot);
   lock.waitLock(30000);
   try {
-    const frais = {};
+    const frais = {}, deja = adressesContactees_();
     lireHotels_().forEach(h => { frais[h.id] = h; });
     const aEcrire = lot.filter(h => frais[h.id]).map(h => {
       const f = frais[h.id];
@@ -186,7 +190,7 @@ function analyserProchains(n) {
         emails: h.emails, chambres: h.chambres, etoiles: h.etoiles, marque: h.marque, segment: h.segment,
         statut: f.statut === 'a_analyser' ? 'nouveau' : f.statut, scanne_le: maintenant_(),
       });
-      if (!f.email_choisi && h.emails.length) f.email_choisi = h.emails[0].email;
+      choisirAdresseLibre_(f, deja);
       return f;
     });
     ecrireHotels_(aEcrire);
@@ -226,10 +230,35 @@ function recherches() {
   return ordre.map(r => ({ recherche: r, n: n[r] }));
 }
 
-function listeHotels(recherche) {
+/** Adresses déjà contactées (onglet Envois), en minuscules. */
+function adressesContactees_() {
   const deja = {};
   lireEnvois_().forEach(e => { deja[e.email] = true; });
-  return lireHotels_()
+  return deja;
+}
+
+/** Choisit la meilleure adresse jamais contactée. Si toutes l'ont été, l'hôtel passe en "deja_contacte".
+ *  Retourne true si l'hôtel a changé. */
+function choisirAdresseLibre_(h, deja) {
+  if (h.statut !== 'nouveau') return false;
+  const avant = h.email_choisi;
+  if (h.email_choisi && !deja[h.email_choisi]) return false;
+  const libre = h.emails.find(c => !deja[c.email]);
+  if (libre) h.email_choisi = libre.email;
+  else if (h.emails.length || h.email_choisi) h.statut = 'deja_contacte';
+  return h.email_choisi !== avant || h.statut !== 'nouveau';
+}
+
+function listeHotels(recherche) {
+  const deja = adressesContactees_();
+  // une adresse peut avoir été contactée via un autre hôtel (chaînes) : on bascule sur une adresse libre
+  const tous = lireHotels_(), changes = tous.filter(h => choisirAdresseLibre_(h, deja));
+  if (changes.length) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try { ecrireHotels_(changes); } finally { lock.releaseLock(); }
+  }
+  return tous
     .filter(h => !recherche || h.recherche === recherche)
     .reverse()
     .map(h => {
@@ -278,9 +307,15 @@ function envoyer(id) {
     const to = String(h.email_choisi || '').trim().toLowerCase();
     if (!to) throw new Error(h.nom + ' : pas d\'adresse choisie');
     if (h.statut === 'envoye') throw new Error(h.nom + ' : déjà envoyé');
-    if (lireEnvois_().some(e => e.email === to)) {
-      h.statut = 'ignore'; ecrireHotels_([h]);
-      throw new Error(to + ' a déjà reçu une candidature : envoi annulé');
+    if (adressesContactees_()[to]) {
+      h.statut = 'deja_contacte'; ecrireHotels_([h]);
+      throw new Error(to + ' a déjà reçu une candidature : envoi bloqué');
+    }
+    const ancien = dejaDansGmail_(to);   // envoyé à la main ou par une ancienne version de l'outil
+    if (ancien) {
+      noterEnvoi_(to, h.id, h.nom + ' (trouvé dans Gmail)', ancien.objet, ancien.date);
+      h.statut = 'deja_contacte'; ecrireHotels_([h]);
+      throw new Error(to + ' a déjà reçu un mail de votre part le ' + ancien.date.slice(0, 10) + ' : envoi bloqué');
     }
     if (envoisDuJour_() >= CONFIG.limiteParJour) throw new Error('Limite quotidienne atteinte');
     if (MailApp.getRemainingDailyQuota() < 1) throw new Error('Quota Gmail du jour épuisé');
@@ -291,13 +326,52 @@ function envoyer(id) {
     const cv = cvBlob_().setName(nomFichierCv_(h.nom, CONFIG, '.pdf'));
     const options = { attachments: [cv], name: CONFIG.prenom + ' ' + CONFIG.nom, replyTo: CONFIG.email };
     GmailApp.sendEmail(to, objet, corps, options);
-    const env = feuille_('Envois');
-    env.getRange(env.getLastRow() + 1, 1, 1, COLS_ENVOIS.length).setNumberFormat('@')
-      .setValues([[to, h.id, h.nom, objet, maintenant_()]]);
+    noterEnvoi_(to, h.id, h.nom, objet, maintenant_());
     h.statut = 'envoye';
     ecrireHotels_([h]);
     if (CONFIG.copieCvDrive) dossierCopies_().createFile(cv);
     return { hotel: h.nom, email: to };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function noterEnvoi_(email, hotelId, hotelNom, objet, date) {
+  const env = feuille_('Envois');
+  env.getRange(env.getLastRow() + 1, 1, 1, COLS_ENVOIS.length).setNumberFormat('@')
+    .setValues([[email, hotelId, hotelNom, objet, date]]);
+}
+
+function dejaDansGmail_(email) {
+  const fils = GmailApp.search('in:sent to:"' + email.replace(/"/g, '') + '"', 0, 1);
+  if (!fils.length) return null;
+  const m = fils[0].getMessages().filter(x => x.getTo().toLowerCase().indexOf(email) >= 0).pop() || fils[0].getMessages()[0];
+  return { objet: m.getSubject(), date: Utilities.formatDate(m.getDate(), 'Europe/Paris', "yyyy-MM-dd'T'HH:mm:ss") };
+}
+
+/** Ajoute à l'onglet Envois les candidatures trouvées dans "Messages envoyés" de Gmail (envoyées hors de l'outil).
+ *  Retourne le nombre d'adresses ajoutées. */
+function synchroniserEnvoisGmail() {
+  const moi = Session.getEffectiveUser().getEmail().toLowerCase();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(60000);
+  try {
+    const deja = adressesContactees_();
+    let ajouts = 0;
+    for (let debut = 0; debut < 2000; debut += 100) {
+      const fils = GmailApp.search('in:sent subject:"Candidature spontanée"', debut, 100);
+      fils.forEach(f => f.getMessages().forEach(m => {
+        if (m.getFrom().toLowerCase().indexOf(moi) < 0) return;
+        const date = Utilities.formatDate(m.getDate(), 'Europe/Paris', "yyyy-MM-dd'T'HH:mm:ss");
+        ((m.getTo() + ',' + m.getCc()).toLowerCase().match(EMAIL_RE) || []).forEach(e => {
+          if (e === moi || deja[e]) return;
+          deja[e] = true; ajouts++;
+          noterEnvoi_(e, '', '(trouvé dans Gmail)', m.getSubject(), date);
+        });
+      }));
+      if (fils.length < 100) break;
+    }
+    return ajouts;
   } finally {
     lock.releaseLock();
   }
@@ -350,6 +424,7 @@ function installer() {
   const ss = classeur_();
   const cv = cvBlob_().setName(nomFichierCv_('Hôtel Exemple', CONFIG, '.pdf'));
   ScriptApp.getProjectTriggers();   // autorisation pour l'analyse en arrière-plan
+  Logger.log('Candidatures retrouvées dans Gmail et ajoutées au suivi : ' + synchroniserEnvoisGmail());
   const compte = Session.getEffectiveUser().getEmail();
   Logger.log('Suivi : ' + ss.getUrl());
   Logger.log('CV utilisé : ' + CONFIG.cvNom + ' du ' + infoCv_().date + ' (' + Math.round(cv.getBytes().length / 1024) + ' Ko)');
@@ -665,36 +740,77 @@ function devinerAccor_(site) {
 }
 
 // ============================================================ TYPE D'HÔTEL
+// Le type choisit le paragraphe de la lettre : il doit être juste, sinon la lettre tombe à côté.
+// Il reste modifiable à la main dans le tableau.
 
-const CHAINES = ['ibis', 'mercure', 'novotel', 'sofitel', 'pullman', 'mgallery', 'adagio', 'campanile', 'kyriad',
-  'premiere classe', 'première classe', 'golden tulip', 'tulip inn', 'best western', 'b&b hotel', 'b&b hôtel',
-  'holiday inn', 'crowne plaza', 'intercontinental', 'hilton', 'doubletree', 'hampton', 'marriott', 'courtyard',
-  'moxy', 'ac hotel', 'renaissance', 'radisson', 'park inn', 'hyatt', 'citadines', 'okko', 'hotelf1', 'hôtel f1',
-  'hotel f1', "appart'city", 'appart city', 'fasthotel', 'brit hotel', 'the originals', 'zenitude', 'odalys',
-  'staycity', 'mama shelter', 'greet', 'comfort hotel', 'quality hotel', 'clarion', 'residence inn', 'nemea',
-  'séjours & affaires', 'sejours & affaires'];
-const DOMAINES_CHAINES = { 'accor.com': 'Accor', 'marriott.com': 'Marriott', 'hilton.com': 'Hilton', 'ihg.com': 'IHG',
-  'bestwestern': 'Best Western', 'hotel-bb.com': 'B&B Hotels', 'choicehotels': 'Choice Hotels',
-  'louvrehotels.com': 'Louvre Hotels', 'radissonhotels.com': 'Radisson', 'hyatt.com': 'Hyatt',
-  'appartcity.com': "Appart'City", 'brithotel.fr': 'Brit Hotel', 'okkohotels.com': 'Okko' };
+// [motif dans le nom ou la marque, libellé utilisé dans la lettre, type]  (les motifs longs d'abord)
+const ENSEIGNES = [
+  ['ibis budget', 'ibis budget', 'economique'], ['ibis styles', 'ibis Styles', 'economique'], ['ibis', 'ibis', 'economique'],
+  ['hotelf1', 'hotelF1', 'economique'], ['hôtel f1', 'hotelF1', 'economique'], ['hotel f1', 'hotelF1', 'economique'],
+  ['b&b hotel', 'B&B', 'economique'], ['b&b hôtel', 'B&B', 'economique'], ['premiere classe', 'Première Classe', 'economique'],
+  ['première classe', 'Première Classe', 'economique'], ['campanile', 'Campanile', 'economique'], ['kyriad', 'Kyriad', 'economique'],
+  ['fasthotel', 'Fasthotel', 'economique'], ['brit hotel', 'Brit Hotel', 'economique'], ['greet', 'Greet', 'economique'],
+  ['ace hotel', 'Ace Hotel', 'economique'], ['quick palace', 'Quick Palace', 'economique'], ['balladins', 'Balladins', 'economique'],
+  ['hampton', 'Hampton by Hilton', 'economique'], ['holiday inn express', 'Holiday Inn Express', 'economique'],
 
-function detecterChaine_(h) {
-  if (h.marque) return h.marque;
-  const nom = String(h.nom || '').toLowerCase();
-  for (const c of CHAINES) {
-    const re = new RegExp('(^|[^a-zà-ÿ])' + c.replace(/[.*+?^${}()|[\]\\&']/g, '\\$&') + '([^a-zà-ÿ]|$)');
-    if (re.test(nom)) return c === 'ibis' ? 'ibis' : c.replace(/(^|\s)\S/g, s => s.toUpperCase());
+  ['aparthotel adagio', 'Adagio', 'residence'], ['adagio', 'Adagio', 'residence'], ['citadines', 'Citadines', 'residence'],
+  ["appart'city", "Appart'City", 'residence'], ['appart city', "Appart'City", 'residence'], ['staycity', 'Staycity', 'residence'],
+  ['odalys', 'Odalys', 'residence'], ['zenitude', 'Zenitude', 'residence'], ['séjours & affaires', 'Séjours & Affaires', 'residence'],
+  ['sejours & affaires', 'Séjours & Affaires', 'residence'], ['residence inn', 'Residence Inn', 'residence'],
+  ['nemea', 'Nemea', 'residence'], ['lagrange', 'Lagrange', 'residence'], ['pierre & vacances', 'Pierre & Vacances', 'residence'],
+
+  ['sofitel', 'Sofitel', 'luxe'], ['raffles', 'Raffles', 'luxe'], ['fairmont', 'Fairmont', 'luxe'],
+  ['four seasons', 'Four Seasons', 'luxe'], ['ritz', 'Ritz', 'luxe'], ['shangri-la', 'Shangri-La', 'luxe'],
+  ['peninsula', 'Peninsula', 'luxe'], ['mandarin oriental', 'Mandarin Oriental', 'luxe'], ['waldorf', 'Waldorf Astoria', 'luxe'],
+  ['park hyatt', 'Park Hyatt', 'luxe'], ['barrière', 'Barrière', 'luxe'], ['cheval blanc', 'Cheval Blanc', 'luxe'],
+  ['st. regis', 'St. Regis', 'luxe'], ['bulgari', 'Bulgari', 'luxe'],
+
+  ['mercure', 'Mercure', 'groupe'], ['novotel', 'Novotel', 'groupe'], ['pullman', 'Pullman', 'groupe'],
+  ['mgallery', 'MGallery', 'groupe'], ['golden tulip', 'Golden Tulip', 'groupe'], ['tulip inn', 'Tulip Inn', 'groupe'],
+  ['best western', 'Best Western', 'groupe'], ['holiday inn', 'Holiday Inn', 'groupe'], ['crowne plaza', 'Crowne Plaza', 'groupe'],
+  ['intercontinental', 'InterContinental', 'groupe'], ['doubletree', 'DoubleTree by Hilton', 'groupe'], ['hilton', 'Hilton', 'groupe'],
+  ['marriott', 'Marriott', 'groupe'], ['courtyard', 'Courtyard by Marriott', 'groupe'], ['moxy', 'Moxy', 'groupe'],
+  ['ac hotel', 'AC Hotels', 'groupe'], ['renaissance', 'Renaissance', 'groupe'], ['radisson', 'Radisson', 'groupe'],
+  ['park inn', 'Park Inn', 'groupe'], ['hyatt', 'Hyatt', 'groupe'], ['okko', 'Okko', 'groupe'],
+  ['the originals', 'The Originals', 'groupe'], ['mama shelter', 'Mama Shelter', 'groupe'], ['comfort hotel', 'Comfort', 'groupe'],
+  ['quality hotel', 'Quality', 'groupe'], ['clarion', 'Clarion', 'groupe'], ['kopster', 'Kopster', 'groupe'],
+];
+const DOMAINES_ENSEIGNES = { 'hotel-bb.com': ['B&B', 'economique'], 'appartcity.com': ["Appart'City", 'residence'],
+  'adagio-city.com': ['Adagio', 'residence'], 'citadines.com': ['Citadines', 'residence'], 'brithotel.fr': ['Brit Hotel', 'economique'],
+  'campanile.com': ['Campanile', 'economique'], 'kyriad.com': ['Kyriad', 'economique'], 'premiereclasse.com': ['Première Classe', 'economique'],
+  'bestwestern': ['Best Western', 'groupe'], 'marriott.com': ['Marriott', 'groupe'], 'hilton.com': ['Hilton', 'groupe'],
+  'ihg.com': ['IHG', 'groupe'], 'radissonhotels.com': ['Radisson', 'groupe'], 'hyatt.com': ['Hyatt', 'groupe'],
+  'okkohotels.com': ['Okko', 'groupe'], 'accor.com': ['Accor', 'groupe'] };
+
+function chercherEnseigne_(texte) {
+  const t = String(texte || '').toLowerCase();
+  for (const e of ENSEIGNES) {
+    const re = new RegExp('(^|[^a-zà-ÿ])' + e[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-zà-ÿ]|$)');
+    if (re.test(t)) return { marque: e[1], type: e[2] };
   }
-  const site = String(h.site || '').toLowerCase();
-  for (const d in DOMAINES_CHAINES) if (site.indexOf(d) >= 0) return DOMAINES_CHAINES[d];
-  return '';
+  return null;
 }
 
-/** independant | intermediaire | groupe | luxe : choisit le paragraphe adapté dans la lettre. */
+/** { marque, type } d'après la marque OpenStreetMap, le nom, puis le site. */
+function enseigne_(h) {
+  const parMarque = chercherEnseigne_(h.marque) || chercherEnseigne_(h.nom);
+  if (parMarque) return parMarque;
+  const site = String(h.site || '').toLowerCase();
+  for (const d in DOMAINES_ENSEIGNES) if (site.indexOf(d) >= 0) return { marque: DOMAINES_ENSEIGNES[d][0], type: DOMAINES_ENSEIGNES[d][1] };
+  return h.marque ? { marque: h.marque, type: 'groupe' } : null;
+}
+
+function detecterChaine_(h) { const e = enseigne_(h); return e ? e.marque : ''; }
+
+/** independant | intermediaire | groupe | economique | residence | luxe */
 function segment_(h) {
-  if ((h.etoiles || 0) >= 5) return 'luxe';
-  if (h.marque) return 'groupe';
+  const e = enseigne_(h);
+  const etoiles = h.etoiles || 0;
+  if (etoiles >= 5 || (e && e.type === 'luxe')) return 'luxe';
+  if (e) return e.type;
+  if (/(^|[^a-zà-ÿ])(r[ée]sidence|appart'?h[oô]tel|aparth[oô]tel|apparth[oô]tel)([^a-zà-ÿ]|$)/i.test(h.nom || '')) return 'residence';
   if (h.chambres && h.chambres > 45) return 'intermediaire';
-  if (h.etoiles === 4 && !h.chambres) return 'intermediaire';
+  if (etoiles === 4) return 'intermediaire';
+  if (etoiles && etoiles <= 2 && h.chambres && h.chambres > 30) return 'economique';
   return 'independant';
 }

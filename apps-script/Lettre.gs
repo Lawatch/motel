@@ -5,8 +5,11 @@
  *   Une variante est tirée au hasard (mais toujours la même pour un hôtel donné),
  *   pour que les 50 mails du jour ne soient pas mot pour mot identiques.
  * - Si une variante utilise une info inconnue (ex : {chambres} vide), elle est ignorée.
- * - [segment:xxx] : paragraphe choisi selon le type d'hôtel : independant | intermediaire | groupe | luxe
- * - [langues] est collé à la fin du paragraphe précédent (et omis pour les hôtels "luxe").
+ * - [segment:xxx] : paragraphe choisi selon le type d'hôtel :
+ *   independant | intermediaire | groupe | economique | residence | luxe
+ * - Les lignes qui commencent par # sont des commentaires (ignorées).
+ * - Quand on connaît la marque, le nombre de chambres ou les étoiles, les variantes qui les citent passent en priorité.
+ * - [langues] est collé à la fin du parcours (et omis pour les hôtels "luxe", où c'est déjà dit).
  *
  * Variables : {hotel} {de_hotel} {au_sein_de} {ville} {a_ville} {chambres} {etoiles} {marque}
  *             {prenom} {nom} {telephone} {email}
@@ -22,41 +25,60 @@ Je me permets de vous adresser ma candidature spontanée pour un poste d'adjoint
 Je me permets de vous écrire pour vous proposer ma candidature spontanée à un poste d'adjoint à la direction {au_sein_de}{a_ville}.
 
 [parcours]
-Je travaille depuis février chez Batisanté, un groupe de services aux bâtiments (propreté, hygiène, sécurité incendie), où je m'occupe de l'intégration de nouvelles filiales. Une bonne partie de mon temps se passe avec les équipes sur le terrain, pour comprendre comment elles travaillent avant d'organiser les changements avec le siège. À Grenoble, par exemple, j'ai revu les tournées d'une équipe de 70 agents de propreté : 31 % de kilomètres en moins, sans que le service rendu aux clients en pâtisse.
+Depuis février, je suis chargé de l'intégration de nouvelles filiales chez Batisanté, un groupe de services aux bâtiments (propreté, hygiène, sécurité incendie). Je pilote cinq projets en parallèle et je travaille au quotidien avec les équipes terrain pour faire évoluer leur organisation. À Grenoble, par exemple, j'ai revu avec les responsables locaux les tournées d'une équipe de 70 agents de propreté : 31 % de kilomètres en moins, sans que le service rendu aux clients en pâtisse.
 
-Avant cela, j'ai suivi des travaux et des budgets d'entretien de sites chez Air Liquide, construit des prévisions financières dans la promotion immobilière, et participé à des missions d'audit chez Keolis. Ce sont des métiers très différents, et c'est ce qui m'a plu : à chaque fois, il a fallu apprendre vite et me rendre utile auprès de personnes qui connaissaient leur métier mieux que moi.
+Avant cela, j'ai suivi des travaux et des budgets chez Air Liquide, construit des prévisions financières dans la promotion immobilière et participé à des missions d'audit chez Keolis. À chaque poste, j'ai découvert un nouveau métier. J'aime comprendre comment les choses fonctionnent sur le terrain, poser des questions à ceux qui les font, puis trouver avec eux ce qui peut être amélioré.
 --
-Depuis février, je suis chez Batisanté, un groupe de propreté, d'hygiène et de sécurité des bâtiments. J'y intègre de nouvelles filiales au fonctionnement du groupe, ce qui veut dire beaucoup de temps passé avec les équipes terrain, et autant à faire le lien avec le siège. Mon dernier chantier : réorganiser les tournées de 70 agents de propreté à Grenoble, avec 31 % de kilomètres en moins et la même qualité de service.
+Je travaille aujourd'hui chez Batisanté, un groupe de propreté, d'hygiène et de sécurité des bâtiments, où je pilote l'intégration de nouvelles filiales : planning, coordination entre les équipes et le siège, accompagnement des agents quand les outils et les méthodes changent. Mon dernier chantier a consisté à réorganiser les tournées de 70 agents à Grenoble, avec 31 % de kilomètres en moins et la même qualité de service.
 
-Auparavant, j'ai travaillé chez Air Liquide sur la gestion des sites (travaux, cahiers des charges, suivi des coûts), dans la promotion immobilière sur les prévisions financières, et chez Keolis en audit interne. J'ai donc pris l'habitude de changer de métier, d'en apprendre rapidement le fonctionnement et de m'y rendre utile.
+Mon parcours m'a fait passer par des métiers assez différents : la gestion de sites et de travaux chez Air Liquide, la finance dans la promotion immobilière, l'audit interne chez Keolis. J'y ai appris à me mettre vite dans le bain, à écouter ceux qui connaissent le terrain et à tenir des objectifs avec des équipes que je découvrais.
 
 [hotellerie]
-Je n'ai pas encore travaillé dans l'hôtellerie, et je préfère vous le dire simplement. C'est pourtant un secteur qui m'attire depuis longtemps : dans un hôtel, l'organisation ne reste pas dans un tableau de bord, elle se voit tout de suite dans l'accueil, l'état d'une chambre ou la façon dont un imprévu est réglé. Après plusieurs postes où je travaillais souvent depuis un siège, j'ai envie d'être sur place, au quotidien, aux côtés d'une direction.
+L'hôtellerie m'attire parce que le travail d'organisation s'y voit tout de suite : dans l'accueil, dans l'état d'une chambre, dans la façon dont un imprévu est réglé. J'ai envie d'être sur place, au quotidien, aux côtés d'une direction.
 --
-Je ne viens pas de l'hôtellerie. Ce qui m'y attire, c'est le lien direct entre le travail des équipes et ce que vit le client : un planning bien construit, une maintenance suivie, un accueil soigné, tout se ressent immédiatement. J'ai envie de quitter un peu les sièges pour un établissement où je vois chaque jour le résultat de ce que je fais, en assistant une direction.
+Ce qui me plaît dans l'hôtellerie, c'est le lien direct entre le travail des équipes et ce que vit le client. Un planning bien construit, une maintenance suivie, un accueil soigné : tout se ressent immédiatement. C'est dans ce type d'environnement que j'ai envie de travailler, en appui d'une direction.
 
+# Petit hôtel indépendant, maison familiale, hôtel de charme
 [segment:independant]
-Dans un établissement de {chambres} chambres comme le vôtre, je sais qu'un adjoint doit pouvoir passer d'un sujet à l'autre dans la même journée : un planning à ajuster, un fournisseur à relancer, un client à recevoir, un budget à suivre. C'est exactement ce type de poste que je recherche.
+Dans un établissement de {chambres} chambres comme le vôtre, je sais qu'un adjoint passe d'un sujet à l'autre dans la même journée : un planning à ajuster, un fournisseur à relancer, un client à recevoir, un budget à suivre. Cette polyvalence est justement ce que je recherche, et je serais heureux de pouvoir soulager la direction sur une partie de ces sujets.
 --
-Dans un hôtel à taille humaine, je sais qu'un adjoint doit pouvoir passer d'un sujet à l'autre dans la même journée : un planning à ajuster, un fournisseur à relancer, un client à recevoir, un budget à suivre. C'est exactement ce type de poste que je recherche.
+Dans un hôtel indépendant, je sais qu'un adjoint passe d'un sujet à l'autre dans la même journée : un planning à ajuster, un fournisseur à relancer, un client à recevoir, un budget à suivre. Cette polyvalence est justement ce que je recherche, et je serais heureux de pouvoir soulager la direction sur une partie de ces sujets.
 --
-Dans un hôtel à taille humaine, l'adjoint n'a pas un seul sujet : il faut aussi bien aider à l'accueil un jour de forte affluence que suivre les dépenses ou relancer un artisan. C'est cette variété qui me plaît, et c'est là que je pense être le plus utile.
+Ce qui m'attire dans un hôtel indépendant, c'est d'être proche de tout : les clients, les équipes, l'entretien de la maison, les comptes. On y aide aussi bien à l'accueil un jour d'affluence qu'au suivi des dépenses ou à la relance d'un artisan. C'est cette variété qui me plaît, et c'est là que je pense être le plus utile.
 
+# Hôtel indépendant de taille moyenne ou 4 étoiles, plusieurs services
 [segment:intermediaire]
-Avec {chambres} chambres et plusieurs services qui doivent avancer ensemble, votre établissement demande une organisation solide. C'est là que je pense pouvoir vous être utile rapidement : suivre l'activité et les coûts, préparer les points avec la direction, faire le lien entre les équipes et veiller à ce que les décisions soient bien appliquées.
+Avec {chambres} chambres, votre établissement fait travailler ensemble la réception, les étages, la maintenance et souvent la restauration. C'est sur cette coordination que je pense pouvoir vous être utile rapidement : suivre l'activité et les coûts, préparer les points avec la direction, faire le lien entre les services et veiller à ce que les décisions soient bien appliquées.
 --
-Dans un hôtel où plusieurs services doivent avancer ensemble, je pense pouvoir être utile rapidement : suivre l'activité et les coûts, préparer les points avec la direction, faire le lien entre les équipes et veiller à ce que les décisions soient bien appliquées.
+Dans un hôtel comme le vôtre, où la réception, les étages, la maintenance et souvent la restauration doivent avancer ensemble, je pense pouvoir être utile rapidement : suivre l'activité et les coûts, préparer les points avec la direction, faire le lien entre les services et veiller à ce que les décisions soient bien appliquées.
 
+# Hôtel de chaîne milieu / haut de gamme (Mercure, Novotel, Best Western, Hilton...)
 [segment:groupe]
-Travailler dans un hôtel {marque} m'intéresse aussi pour une raison précise : mon poste actuel consiste à faire le lien entre des établissements et les standards d'un groupe, en veillant à ce que les outils et les process du siège restent applicables sur le terrain. C'est un rôle que je me verrais bien tenir dans votre établissement.
+Travailler dans un hôtel {marque} m'intéresse pour une raison précise : mon poste actuel consiste à faire le lien entre des établissements et le siège d'un groupe, en veillant à ce que les standards et les outils communs restent applicables sur le terrain. J'aimerais mettre cette expérience au service de votre direction, tout en apprenant les standards de l'enseigne.
 --
-Votre hôtel faisant partie du réseau {marque}, je pense que mon expérience actuelle peut vous servir : j'accompagne des établissements dans l'application des process et des outils d'un groupe, en tenant compte de leurs contraintes réelles. C'est une expérience que j'aimerais mettre à profit chez vous.
+Votre hôtel faisant partie du réseau {marque}, je pense que mon expérience actuelle peut vous servir : j'accompagne des établissements dans l'application des process et des outils d'un groupe, en tenant compte de leurs contraintes réelles. J'aimerais en faire profiter votre direction, tout en apprenant les standards de l'enseigne.
+--
+Travailler dans un hôtel de groupe m'intéresse pour une raison précise : mon poste actuel consiste à faire le lien entre des établissements et le siège d'un groupe, en veillant à ce que les standards et les outils communs restent applicables sur le terrain. J'aimerais mettre cette expérience au service de votre direction, tout en apprenant les standards de l'enseigne.
 
+# Hôtel économique (ibis, B&B, Campanile, Première Classe... ou 1-2 étoiles)
+[segment:economique]
+Je sais que dans un hôtel {marque}, l'organisation doit être très efficace : des équipes resserrées, beaucoup de passage, des coûts suivis de près. C'est un terrain que je connais : chez Batisanté comme chez Air Liquide, mon travail consiste à trouver des marges de manœuvre sans dégrader le service. Je serais heureux d'aider la direction à tenir ce cap au quotidien, sur le planning, les achats ou le suivi de l'activité.
+--
+Je sais que dans un hôtel économique, l'organisation doit être très efficace : des équipes resserrées, beaucoup de passage, des coûts suivis de près. C'est un terrain que je connais : chez Batisanté comme chez Air Liquide, mon travail consiste à trouver des marges de manœuvre sans dégrader le service. Je serais heureux d'aider la direction à tenir ce cap au quotidien, sur le planning, les achats ou le suivi de l'activité.
+
+# Résidence hôtelière / appart'hôtel (Adagio, Citadines, Appart'City...)
+[segment:residence]
+Une résidence {marque} demande une organisation un peu particulière : des séjours plus longs, une clientèle souvent en déplacement professionnel, des appartements et des équipements à suivre de près. La gestion de sites et la coordination d'équipes de propreté, qui font partie de mon quotidien, me semblent très proches de ces sujets, et j'aimerais aider la direction à les tenir au jour le jour.
+--
+Une résidence hôtelière demande une organisation un peu particulière : des séjours plus longs, une clientèle souvent en déplacement professionnel, des appartements et des équipements à suivre de près. La gestion de sites et la coordination d'équipes de propreté, qui font partie de mon quotidien, me semblent très proches de ces sujets, et j'aimerais aider la direction à les tenir au jour le jour.
+
+# 5 étoiles, palace, grandes enseignes de luxe
 [segment:luxe]
-Je mesure le niveau d'exigence d'un établissement {etoiles} étoiles comme le vôtre, où le client remarque tout. Chez Air Liquide comme chez Keolis, j'ai appris à aller dans le détail des processus pour repérer ce qui coince, et je crois que c'est une habitude utile dans un hôtel de ce niveau. J'ai par ailleurs étudié trois ans à Manchester et je parle anglais couramment, ainsi qu'espagnol.
+Je mesure le niveau d'exigence d'un établissement {etoiles} étoiles comme le vôtre, où le client remarque tout. J'ai l'habitude d'aller dans le détail des processus pour repérer ce qui coince et de suivre chaque sujet jusqu'au bout, et je crois que c'est une qualité utile dans un hôtel de ce niveau. J'ai par ailleurs étudié trois ans à Manchester et je parle anglais couramment, ainsi qu'espagnol.
 --
-Je mesure le niveau d'exigence d'un établissement comme le vôtre, où le client remarque tout. Chez Air Liquide comme chez Keolis, j'ai appris à aller dans le détail des processus pour repérer ce qui coince, et je crois que c'est une habitude utile dans un hôtel de ce niveau. J'ai par ailleurs étudié trois ans à Manchester et je parle anglais couramment, ainsi qu'espagnol.
+Je mesure le niveau d'exigence d'un établissement comme le vôtre, où le client remarque tout. J'ai l'habitude d'aller dans le détail des processus pour repérer ce qui coince et de suivre chaque sujet jusqu'au bout, et je crois que c'est une qualité utile dans un hôtel de ce niveau. J'ai par ailleurs étudié trois ans à Manchester et je parle anglais couramment, ainsi qu'espagnol.
 
+# Phrase ajoutée à la fin du parcours. Pas utilisée pour les hôtels "luxe" (déjà dit dans leur paragraphe).
 [langues]
 Je parle anglais couramment, après trois ans d'études à Manchester, et j'ai un bon niveau d'espagnol.
 --
@@ -78,7 +100,7 @@ Je vous remercie de votre attention et vous prie d'agréer, Madame, Monsieur, me
 {email}
 `;
 
-const ORDRE_LETTRE = ['ouverture', 'parcours', 'hotellerie', 'segment', 'langues', 'conclusion', 'politesse'];
+const ORDRE_LETTRE = ['ouverture', 'parcours', 'langues', 'hotellerie', 'segment', 'conclusion', 'politesse'];
 const CHAMPS_OPTIONNELS = ['chambres', 'etoiles', 'marque', 'ville'];
 
 function lireModele_(texte) {
@@ -89,6 +111,7 @@ function lireModele_(texte) {
     sections[courante] = tampon.join('\n').split(/^--\s*$/m).map(v => v.replace(/^\n+|\n+$/g, '')).filter(v => v.trim());
   };
   texte.split('\n').forEach(l => {
+    if (l.charAt(0) === '#') return;
     const m = l.match(/^\[([\w:]+)\]\s*$/);
     if (m) { vider(); courante = m[1]; tampon = []; } else tampon.push(l);
   });
@@ -124,9 +147,12 @@ function hash_(s) {
 }
 
 function choisirVariante_(variantes, f, graine) {
-  const ok = (variantes || []).filter(v => (v.match(/\{(\w+)\}/g) || [])
-    .every(x => { const k = x.slice(1, -1); return CHAMPS_OPTIONNELS.indexOf(k) < 0 || f[k]; }));
+  const optionnels = v => (v.match(/\{(\w+)\}/g) || []).map(x => x.slice(1, -1)).filter(k => CHAMPS_OPTIONNELS.indexOf(k) >= 0);
+  let ok = (variantes || []).filter(v => optionnels(v).every(k => f[k]));
   if (!ok.length) return null;
+  // on préfère les variantes qui citent ce qu'on sait de l'hôtel (marque, nombre de chambres, étoiles)
+  const max = Math.max.apply(null, ok.map(v => optionnels(v).length));
+  ok = ok.filter(v => optionnels(v).length === max);
   return ok[hash_(graine) % ok.length].replace(/\{(\w+)\}/g, (x, k) => (k in f ? f[k] : x));
 }
 

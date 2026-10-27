@@ -97,7 +97,7 @@
 </aside>
 
 <aside id="hist" class="panel">
-  <div class="row"><strong class="grow">Candidatures envoyées</strong><button id="hClose">Fermer</button></div>
+  <div class="row"><strong class="grow" id="hTitre">Candidatures envoyées</strong><button id="hSync" title="Ajoute au suivi les candidatures envoyées depuis Gmail hors de l'outil">Récupérer depuis Gmail</button><button id="hClose">Fermer</button></div>
   <div id="histListe"></div>
 </aside>
 
@@ -109,7 +109,8 @@
 
 <script>
 const $ = s => document.querySelector(s);
-const SEG = {independant:"Indépendant", intermediaire:"Intermédiaire", groupe:"Groupe / chaîne", luxe:"Luxe 5★"};
+const SEG = {independant:"Indépendant", intermediaire:"Indépendant moyen / 4★", groupe:"Chaîne", economique:"Économique",
+             residence:"Résidence / appart'hôtel", luxe:"Luxe 5★"};
 const LOT = 6, EN_PARALLELE = 6;  // 6 appels Apps Script en même temps, 6 hôtels chacun
 let hotels = [], selected = new Set(), considered = new Set(), state = {}, current = null;
 let stop = false, sending = false, scanning = false;
@@ -177,10 +178,11 @@ function render() {
   const partage = {};
   hotels.forEach(h => { if (h.email_choisi) partage[h.email_choisi] = (partage[h.email_choisi] || 0) + 1; });
   $("#rows").innerHTML = visible().map(h => {
-    const opts = h.emails.map(c => `<option value="${esc(c.email)}" ${c.email === h.email_choisi ? "selected" : ""}>
-        ${c.deja_envoye ? "✔ " : ""}${esc(c.email)} (${c.score})</option>`).join("");
+    const opts = h.emails.map(c => `<option value="${esc(c.email)}" ${c.email === h.email_choisi ? "selected" : ""} ${c.deja_envoye ? "disabled" : ""}>
+        ${c.deja_envoye ? "déjà contactée - " : ""}${esc(c.email)} (${c.score})</option>`).join("");
     const c = h.emails.find(c => c.email === h.email_choisi);
-    const statut = h.statut === "envoye" || h.deja_envoye ? "Envoyé" : h.statut === "ignore" ? "Ignoré" :
+    const statut = h.statut === "envoye" ? "Envoyé" : h.statut === "deja_contacte" || h.deja_envoye ? "Déjà contacté" :
+                   h.statut === "ignore" ? "Ignoré" :
                    h.statut === "a_analyser" ? "Non analysé" : "";
     return `<tr data-id="${h.id}" class="${selected.has(h.id) ? "sel" : ""} ${sendable(h) ? "" : "done"}">
       <td><input type="checkbox" class="chk" ${selected.has(h.id) ? "checked" : ""} ${sendable(h) ? "" : "disabled"}></td>
@@ -263,7 +265,7 @@ $("#btnScan").onclick = async () => {
   try {
     progress(0, 1, "Recherche des hôtels sur OpenStreetMap…");
     const r = await run("scanVille", villes, +$("#limite").value);
-    $("#progTxt").textContent = `${r.total} hôtels trouvés (${r.nouveaux} nouveaux)`;
+    $("#progTxt").textContent = `${r.nouveaux} nouveaux hôtels` + (r.dejaConnus ? ` · ${r.dejaConnus} déjà dans le suivi, ignorés` : "");
     await loadRecherches(r.recherches.length === 1 ? r.recherches[0] : "");
     await loadHotels();
     analyser();
@@ -336,9 +338,16 @@ $("#btnSend").onclick = async () => {
 
 $("#btnHist").onclick = async () => {
   const h = await run("historique");
+  $("#hTitre").textContent = `${h.length} adresse(s) déjà contactée(s)`;
   $("#histListe").innerHTML = h.length ? h.map(r => `<div><span class="small">${esc(r.envoye_le.replace("T", " "))}</span><br>${esc(r.hotel_nom)} &lt;${esc(r.email)}&gt;</div>`).join("")
                                        : "Aucun envoi pour l'instant.";
   $("#hist").classList.add("open");
+};
+$("#hSync").onclick = async () => {
+  $("#hSync").disabled = true;
+  try { const n = await run("synchroniserEnvoisGmail"); $("#log").textContent = `${n} adresse(s) retrouvée(s) dans Gmail`; await loadHotels(); $("#btnHist").onclick(); }
+  catch (err) { $("#log").textContent = err.message; }
+  $("#hSync").disabled = false;
 };
 $("#hClose").onclick = () => $("#hist").classList.remove("open");
 

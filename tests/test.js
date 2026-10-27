@@ -16,7 +16,9 @@ function fakeSheet() {
   return sh;
 }
 function context() {
-  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {}, cache = {}, triggers = [];
+  const sheets = { 'Feuille 1': fakeSheet() }, sent = [], props = {}, cache = {}, triggers = [], gmail = [];
+  const msg = (to, objet, date) => ({ getTo: () => to, getCc: () => '', getFrom: () => 'Léopold Watchi <leo.watchi@gmail.com>',
+    getSubject: () => objet, getDate: () => new Date(date || '2026-10-01T10:00:00Z') });
   const ss = {
     getId: () => 'ss1', getUrl: () => 'https://sheet',
     getSheets: () => [sheets['Feuille 1']],
@@ -33,7 +35,7 @@ function context() {
   };
   const blob = name => ({ n: name, setName(x) { this.n = x; return this; }, getName() { return this.n; }, copyBlob() { return blob(this.n); }, getBytes: () => [1] });
   const ctx = {
-    console, user: 'leo.watchi@gmail.com', sent, triggers, cache,
+    console, user: 'leo.watchi@gmail.com', sent, triggers, cache, gmail, msg,
     Utilities: { formatDate: (d, tz, f) => d.toISOString().slice(0, f.indexOf('HH') > 0 ? 19 : 10) },
     SpreadsheetApp: { create: () => ss, openById: () => ss },
     PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
@@ -44,7 +46,15 @@ function context() {
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => ctx.user }) },
     MailApp: { getRemainingDailyQuota: () => 100 },
-    GmailApp: { sendEmail: (to, objet, corps, o) => sent.push({ to, objet, corps, pj: o.attachments[0].getName(), from: o.name }) },
+    GmailApp: {
+      sendEmail: (to, objet, corps, o) => { sent.push({ to, objet, corps, pj: o.attachments[0].getName(), from: o.name }); gmail.push(msg(to, objet)); },
+      search: (q, debut) => {
+        if (debut) return [];
+        const to = (q.match(/to:"([^"]+)"/) || [])[1], sujet = (q.match(/subject:"([^"]+)"/) || [])[1];
+        return gmail.filter(m => (!to || m.getTo().indexOf(to) >= 0) && (!sujet || m.getSubject().indexOf(sujet) >= 0))
+          .map(m => ({ getMessages: () => [m] }));
+      },
+    },
     MimeType: { PDF: 'application/pdf', GOOGLE_DOCS: 'gdoc' },
     DriveApp: { searchFiles: q => { ctx.requeteDrive = q; const fs = ctx.fichiersDrive.slice(); return { hasNext: () => fs.length > 0, next: () => fs.shift() }; } },
     UrlFetchApp: {
@@ -94,12 +104,19 @@ test('classement des adresses', () => {
 
 test('type d\'hôtel', () => {
   const g = context();
-  assert.strictEqual(g.detecterChaine_({ nom: 'ibis Styles Lyon Centre' }), 'ibis');
+  assert.strictEqual(g.detecterChaine_({ nom: 'ibis Styles Lyon Centre' }), 'ibis Styles');
   assert.strictEqual(g.detecterChaine_({ nom: 'Hôtel Best Western Crequi' }), 'Best Western');
   assert.strictEqual(g.detecterChaine_({ nom: 'Hôtel du Greenwich' }), '');
-  assert.strictEqual(g.segment_({ etoiles: 5, marque: 'Sofitel' }), 'luxe');
-  assert.strictEqual(g.segment_({ chambres: 80 }), 'intermediaire');
-  assert.strictEqual(g.segment_({ chambres: 20, etoiles: 3 }), 'independant');
+  const cas = [
+    [{ nom: 'Sofitel Lyon Bellecour' }, 'luxe'], [{ nom: 'Hôtel X', etoiles: 5 }, 'luxe'], [{ nom: 'Le Royal', marque: 'Barrière' }, 'luxe'],
+    [{ nom: 'ibis budget Lyon Est' }, 'economique'], [{ nom: 'B&B HOTEL Lyon Centre' }, 'economique'], [{ nom: 'Campanile Lyon' }, 'economique'],
+    [{ nom: 'Hôtel X', site: 'https://www.hotel-bb.com/fr/hotel/x' }, 'economique'],
+    [{ nom: 'Aparthotel Adagio Lyon' }, 'residence'], [{ nom: "Appart'City Confort Lyon" }, 'residence'], [{ nom: 'Résidence du Parc' }, 'residence'],
+    [{ nom: 'Mercure Lyon Centre' }, 'groupe'], [{ nom: 'Novotel Lyon' }, 'groupe'], [{ nom: 'Hôtel X', marque: 'Logis' }, 'groupe'],
+    [{ nom: 'Hôtel du Greenwich', chambres: 80 }, 'intermediaire'], [{ nom: 'Hôtel du Greenwich', etoiles: 4 }, 'intermediaire'],
+    [{ nom: 'Hôtel du Greenwich', chambres: 20, etoiles: 3 }, 'independant'], [{ nom: 'Hôtel du Greenwich' }, 'independant'],
+  ];
+  cas.forEach(([h, t]) => assert.strictEqual(g.segment_(h), t, h.nom));
 });
 
 test('lettre : 4 types, pas de variable oubliée', () => {
@@ -108,13 +125,21 @@ test('lettre : 4 types, pas de variable oubliée', () => {
   assert.strictEqual(g.deHotel_('Le Grand Hôtel'), 'du Grand Hôtel');
   assert.strictEqual(g.deHotel_('Mercure Lyon Centre'), "de l'hôtel Mercure Lyon Centre");
   for (const [seg, extra] of [['independant', {}], ['independant', { chambres: 24 }], ['intermediaire', { chambres: 80 }],
-    ['groupe', { marque: 'ibis' }], ['luxe', { etoiles: 5 }], ['luxe', {}]]) {
+    ['intermediaire', {}], ['groupe', { marque: 'Mercure' }], ['groupe', {}], ['economique', { marque: 'ibis' }], ['economique', {}],
+    ['residence', { marque: 'Adagio' }], ['residence', {}], ['luxe', { etoiles: 5 }], ['luxe', {}]]) {
+    for (const nom of ['Hôtel Test', 'Hôtel Test ', 'Hôtel  Test', 'Hôtel Test.']) {   // autres graines -> autres variantes
+      const c = g.construireLettre_(Object.assign({ nom: nom, ville: 'Lyon', segment: seg }, extra), C).corps;
+      assert.ok(!/[{}]/.test(c), seg + ' : variable non remplie');
+      assert.ok(!/jamais|pas encore travaillé|ne viens pas|pas d'expérience/i.test(c), seg + ' : ne doit pas dire que je débute');
+      assert.ok(c.indexOf('\n\nundefined') < 0 && !/undefined|null/.test(c));
+    }
     const l = g.construireLettre_(Object.assign({ nom: 'Hôtel Test', ville: 'Lyon', segment: seg }, extra), C);
     assert.ok(l.corps.startsWith('Madame, Monsieur,\n\nJe me permets'), l.corps.slice(0, 60));
     assert.ok(l.corps.includes("au sein de l'Hôtel Test à Lyon"));
     assert.ok(!/[{}]/.test(l.corps + l.objet), l.corps);
     assert.ok(l.corps.trim().endsWith('leo.watchi@gmail.com'));
     assert.strictEqual((l.corps.match(/Manchester/g) || []).length, 1);
+    if (seg !== 'independant' && seg !== 'intermediaire') assert.ok(/économique|résidence|exigence|réseau|enseigne|hôtel Mercure|Adagio|ibis/.test(l.corps), seg);
   }
   assert.strictEqual(g.nomFichierCv_('Hôtel / Le Parc', C, '.pdf'), 'CV Léopold Watchi Hôtel Le Parc.pdf');
 });
@@ -128,7 +153,7 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
     { type: 'way', id: 4, tags: { name: 'Hôtel Bis', email: 'marie.dupont@hotelduparc.fr', tourism: 'hotel' } },
   ] };
   const r = g.scanVille('Lyon', 100);
-  same([r.total, r.nouveaux], [3, 3]);
+  same([r.total, r.nouveaux, r.dejaConnus], [3, 3, 0]);
   assert.strictEqual(g.triggers.length, 1);              // analyse en arrière-plan programmée
   assert.strictEqual(g.analyserProchains(2), 2);
   assert.strictEqual(g.analyserProchains(2), 1);          // les 2 premiers sont déjà réservés / faits
@@ -148,7 +173,7 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
   assert.strictEqual(hs.find(h => h.nom === 'Hôtel Fantôme').emails.length, 0);
 
   // un 2e scan ne crée pas de doublon
-  assert.strictEqual(g.scanVille('Lyon, Annecy', 100).nouveaux, 0);
+  same((({ nouveaux, dejaConnus }) => [nouveaux, dejaConnus])(g.scanVille('Lyon, Annecy', 100)), [0, 3]);
   assert.strictEqual(g.listeHotels().length, 3);
 
   // le CV est le plus récent des CV_Leopold_Watchi.pdf du Drive
@@ -163,14 +188,31 @@ test('parcours complet : scan, analyse, test, envoi réel, doublon refusé, mauv
   assert.strictEqual(g.etat().envoyesAujourdhui, 1);
   assert.throws(() => g.envoyer(parc.id), /déjà envoyé/);
   const bis = g.listeHotels().find(h => h.nom === 'Hôtel Bis');
-  assert.strictEqual(bis.email_choisi, 'marie.dupont@hotelduparc.fr');
-  assert.ok(bis.deja_envoye);
+  // Hôtel Bis n'avait que l'adresse déjà contactée : il n'est plus proposé
+  assert.strictEqual(bis.statut, 'deja_contacte');
   assert.throws(() => g.envoyer(bis.id), /déjà reçu une candidature/);
   assert.strictEqual(g.sent.length, 1);
 
+  // adresse partagée : un hôtel qui en a une autre bascule dessus
+  g.modifierHotel(bis.id, { statut: 'nouveau', email_choisi: 'marie.dupont@hotelduparc.fr' });
+  g.eval("ecrireHotels_([Object.assign(hotel_(" + bis.id + "), { emails: [{ email: 'marie.dupont@hotelduparc.fr', score: 70 }, { email: 'rh@bis.fr', score: 60 }] })])");
+  const bis2 = g.listeHotels().find(h => h.nom === 'Hôtel Bis');
+  same([bis2.statut, bis2.email_choisi], ['nouveau', 'rh@bis.fr']);
+
+  // adresse déjà écrite à la main depuis Gmail (hors outil) : bloquée et ajoutée au suivi
+  g.gmail.push(g.msg('rh@bis.fr', 'Candidature', '2026-09-15T10:00:00Z'));
+  assert.throws(() => g.envoyer(bis2.id), /déjà reçu un mail de votre part le 2026-09-15/);
+  assert.strictEqual(g.sent.length, 1);
+  assert.ok(g.historique().some(e => e.email === 'rh@bis.fr'));
+
+  // récupération des anciennes candidatures envoyées depuis Gmail
+  g.gmail.push(g.msg('contact@ancien-hotel.fr, direction@autre.fr', 'Candidature spontanée - Adjoint à la direction - Ancien'));
+  assert.strictEqual(g.synchroniserEnvoisGmail(), 2);
+  assert.strictEqual(g.synchroniserEnvoisGmail(), 0);
+
   g.user = 'autre@entreprise.fr';
   assert.throws(() => g.envoyer(bis.id), /installez-le sur leo.watchi@gmail.com/);
-  assert.strictEqual(g.historique().length, 1);
+  assert.strictEqual(g.historique().length, 4);
 });
 
 let ko = 0;
